@@ -149,6 +149,9 @@ function App() {
     return () => { controller.dispose(); connectionRef.current = null; };
   }, [connection]);
   const video = state.video;
+  // YouTube states from builds before platform tagging remain valid. Bilibili
+  // has always identified itself explicitly, so the only safe fallback is YouTube.
+  const isBilibili = video?.platform === 'bilibili';
   const sourceId = sourceChoice.session === video?.session
     && (sourceChoice.id === 'auto' || sourceChoice.id === 'settings' || video?.tracks.some(t => t.id === sourceChoice.id))
     ? sourceChoice.id : 'auto';
@@ -188,11 +191,11 @@ function App() {
     }
   }
   useEffect(() => {
-    if (!settingsReady || !hasSupadataKey || !video || video.platform !== 'youtube' || state.status !== 'ready') return;
+    if (!settingsReady || !hasSupadataKey || !video || isBilibili || state.status !== 'ready') return;
     if (autoRequestedSessionRef.current === video.session) return;
     autoRequestedSessionRef.current = video.session;
     void loadSupadata();
-  }, [settingsReady, hasSupadataKey, video?.session, state.status, sourceTrack?.id]);
+  }, [settingsReady, hasSupadataKey, video?.session, isBilibili, state.status, sourceTrack?.id]);
   const selectedIndex = echoRows.findIndex(item => item.id === selected);
   const playingIndex = activeTimedRowIndex(echoRows, currentTimeMs);
   const activeIndex = currentTimeMs === null ? selectedIndex : playingIndex;
@@ -393,11 +396,11 @@ function App() {
         if (!track || !video) return;
         setSourceChoice({ session: video.session, id: track.id });
         setSelected(''); setPlayback('');
-        if (video.platform === 'bilibili') connectionRef.current?.send({ version: 1, type: 'bilibili-select', trackId: track.id, videoId: video.videoId, session: video.session });
+        if (isBilibili) connectionRef.current?.send({ version: 1, type: 'bilibili-select', trackId: track.id, videoId: video.videoId, session: video.session });
         else void loadSupadata(track);
       }}>
         {!video?.tracks.some(track => track.id === loadedTrackId) ? <option value="loaded">{languageLabel(state.requestedLanguage ?? state.language)}</option> : null}
-        {video?.tracks.map(track => <option key={track.id} value={track.id}>{video.platform === 'bilibili' ? track.name : languageLabel(track.language)}{track.kind === 'asr' ? ' (Auto)' : ''}</option>)}
+        {video?.tracks.map(track => <option key={track.id} value={track.id}>{isBilibili ? track.name : languageLabel(track.language)}{track.kind === 'asr' ? ' (Auto)' : ''}</option>)}
       </select><ChevronDown className="echo-chevron" aria-hidden="true"/></label>
        <label className="echo-select-wrap"><Languages aria-hidden="true"/><select className="echo-filter echo-mode" aria-label="字幕显示" value={rawFallback ? 'raw' : 'phrases'} onChange={event => {
         setDisplayMode(event.target.value as 'phrases' | 'raw'); setSelected(''); setPlayback('');
@@ -411,7 +414,7 @@ function App() {
         {moreOpen ? <div id="echo-more-menu" className="echo-more-menu" role="menu">
           <button role="menuitem" disabled={busy} onClick={() => {
             setMoreOpen(false);
-            if (video?.platform === 'bilibili') connectionRef.current?.send({ version: 1, type: 'refresh' });
+            if (isBilibili) connectionRef.current?.send({ version: 1, type: 'refresh' });
             else void loadSupadata();
           }}><RefreshCw/><span>重新获取字幕</span></button>
           <button role="menuitem" onClick={() => { setMoreOpen(false); setGuideOpen(true); }}><CircleHelp/><span>显示引导</span></button>
@@ -471,7 +474,7 @@ function App() {
       <button className={`echo-mic ${recording ? 'recording' : ''}`} aria-label={recording ? '停止跟读录音' : '开始跟读录音'} title={recording ? '停止录音' : '跟读录音'} onClick={() => void toggleRecording()}>{recording ? <Square /> : <Mic />}</button>
     </div>
   </main>;
-  const fetching = busy || !settingsReady || Boolean(video?.platform === 'youtube' && hasSupadataKey && state.status === 'ready');
+  const fetching = busy || !settingsReady || Boolean(video && !isBilibili && hasSupadataKey && state.status === 'ready');
   return <main className="echo-shell echo-empty-shell">
     {video ? <div className="echo-connected" role="status"><span aria-hidden="true">✓</span>视频已连接</div> : null}
     <section className="echo-empty" aria-busy={fetching}>
@@ -484,14 +487,14 @@ function App() {
       </div> : !video ? <div className="echo-load-card echo-message-card">
         <div className="echo-state-icon" aria-hidden="true">V</div><h1>打开一个视频</h1><p>{state.message}</p>
         <button className="echo-link" onClick={() => setConnection(value => value + 1)}>重新连接</button>
-      </div> : video.platform === 'youtube' && !hasSupadataKey ? <div className="echo-load-card echo-message-card">
+      </div> : !isBilibili && !hasSupadataKey ? <div className="echo-load-card echo-message-card">
         <div className="echo-state-icon" aria-hidden="true">Y</div><h1>设置字幕服务</h1>
         <p>保存 Supadata Key 后，每个新视频会话自动读取一次字幕。</p>
         <button className="echo-primary" onClick={() => void browser.runtime.openOptionsPage()}>打开设置</button>
       </div> : state.status === 'error' ? <div className="echo-load-card echo-message-card failed">
         <div className="echo-state-icon failed" aria-hidden="true">!</div><h1>字幕获取失败</h1><p role="alert">{state.message}</p>
         <button className="echo-primary" onClick={() => {
-          if (video.platform === 'bilibili') connectionRef.current?.send({ version: 1, type: 'refresh' });
+          if (isBilibili) connectionRef.current?.send({ version: 1, type: 'refresh' });
           else { autoRequestedSessionRef.current = ''; void loadSupadata(); }
         }}>重新获取字幕</button>
       </div> : <div className="echo-load-card">

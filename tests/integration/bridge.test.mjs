@@ -104,6 +104,7 @@ async function harness(t) {
 
 test('production bridges preserve raw entries and seek a late cue on the bound video', async t => {
   const h = await harness(t);
+  assert.equal(h.state().video.platform, 'youtube');
   assert.equal(h.state().video.tracks.length, 2);
   h.load(); await tick();
   assert.equal(h.state().status, 'loaded'); assert.equal(h.state().cues.length, 3);

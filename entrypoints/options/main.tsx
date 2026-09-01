@@ -41,7 +41,7 @@ function Options() {
     finally { setBusy(false); }
   }
   return <main>
-    <header><span className="badge">YOUTUBE LANGUAGE HELPER</span><h1>字幕 API 设置</h1><p>主字幕来源采用 YouTube Digest 的 Supadata 链路。保存并测试后，回面板点击“读取字幕 · Supadata”。</p></header>
+    <header><span className="badge">YOUTUBE LANGUAGE HELPER</span><h1>字幕 API 设置</h1><p>主字幕来源采用 YouTube Digest 的 Supadata 链路。保存后，新视频会话会自动读取一次字幕。</p></header>
     <section className="settings-card">
       <h2>Supadata · 只提取已有字幕</h2>
       <p>固定使用 <code>native</code> 模式，不自动生成字幕。服务返回条目会标注来源；未保证与网站原轨分段逐条一致。</p>
@@ -60,10 +60,10 @@ function Options() {
       <p role="status" className="status">{message}</p>
     </section>
     <section className="settings-card"><h2>数据与费用</h2><p>Key 仅保存在此 Chrome 配置的扩展本地存储，不同步云端；仅扩展可信页面/后台可访问。这不是系统密码保险箱，本机有权限的软件仍可能读取。</p>
-      <p>测试按钮将 Key 发给 <strong>api.supadata.ai</strong> 的账户接口，不发送视频。面板中手动点击获取时，才发送当前视频的标准 URL 和 Key，并使用服务额度。不会发送 Cookie、其他标签页或浏览历史。</p>
+      <p>测试按钮将 Key 发给 <strong>api.supadata.ai</strong> 的账户接口，不发送视频。打开新的 YouTube 视频会话时，扩展会发送当前视频的标准 URL 和 Key 并使用一次服务额度；三点菜单中的“重新获取字幕”会再次调用。不会发送 Cookie、其他标签页或浏览历史。</p>
       <p>未配置、未授权、没有字幕或额度不足时，不自动重试、不切换其他供应商、不调用 AI 转录。</p>
       <p><a href="https://supadata.ai/pricing" target="_blank" rel="noreferrer">查看官方价格</a> · <a href="https://docs.supadata.ai/get-transcript" target="_blank" rel="noreferrer">查看接口说明</a></p></section>
-    <footer>保存后回到 YouTube 侧边栏，点击“通过 Supadata 获取”。无需配置 DeepSeek。</footer>
+    <footer>保存后回到 YouTube 视频，侧边栏会自动开始获取字幕。无需配置 DeepSeek。</footer>
   </main>;
 }
 createRoot(document.getElementById('root')!).render(<Options/>);

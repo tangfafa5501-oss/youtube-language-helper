@@ -80,7 +80,7 @@ export default defineContentScript({
           }
           gate.next();
           state = { ...emptyState(), video: v, trackId: v.tracks[0]?.id ?? null, status: 'ready',
-            message: '已连接视频。点击“读取字幕 · Supadata”；无需等待网页字幕轨或开启 CC。' };
+            message: '视频已连接，正在准备字幕。' };
           publish();
         }
       } catch (error) {
@@ -224,7 +224,7 @@ export default defineContentScript({
         if (m.type === 'select' && typeof m.trackId === 'string' && m.session === state.video?.session
           && state.status !== 'loading' && state.video?.tracks.some(t => t.id === m.trackId)) {
           gate.next(); clearPlaybackBoundary(); state = { ...state, source: 'youtube', trackId: m.trackId, cues: [], eventCount: 0, controlEventCount: 0,
-            status: 'ready', message: '字幕轨已切换，请读取原始条目' }; publish();
+            status: 'ready', message: '字幕轨已切换，正在准备字幕' }; publish();
         }
         if (m.type === 'load' && typeof m.trackId === 'string' && m.session === state.video?.session) void load(m.trackId);
         if (m.type === 'seek') void seek(m, port);

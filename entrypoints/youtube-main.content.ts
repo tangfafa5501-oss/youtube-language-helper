@@ -33,7 +33,8 @@ export default defineContentScript({
       if (!record(response) || !record(response.videoDetails) || response.videoDetails.videoId !== id) {
         response = (window as unknown as { ytInitialPlayerResponse?: unknown }).ytInitialPlayerResponse;
       }
-      const result: VideoInfo = { videoId: id, session, title: document.title.slice(0, 1000), tracks: [], availability: '播放器尚未就绪，请稍后重试' };
+      const result: VideoInfo = { videoId: id, session, title: document.title.slice(0, 1000), tracks: [],
+        availability: '播放器尚未就绪，请稍后重试', platform: 'youtube' };
       urls.clear();
       if (!record(response) || !record(response.videoDetails) || response.videoDetails.videoId !== id) return result;
       result.title = String(response.videoDetails.title ?? result.title).slice(0, 1000);
