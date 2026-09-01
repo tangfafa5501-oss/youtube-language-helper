@@ -30,7 +30,9 @@ export function supportedVideoUrl(value: string | undefined) {
       return url.pathname === '/watch' && /^[\w-]{11}$/.test(url.searchParams.get('v') ?? '');
     }
     if (url.origin === 'https://www.bilibili.com') {
-      return /^\/(?:video|list)\/BV[0-9A-Za-z]{10}(?:\/|$)/.test(url.pathname);
+      if (/^\/(?:video|list)\/BV[0-9A-Za-z]{10}(?:\/|$)/.test(url.pathname)) return true;
+      return /^\/list\/watchlater\/?$/.test(url.pathname)
+        && /^BV1[0-9A-Za-z]{9}$/.test(url.searchParams.get('bvid') ?? '');
     }
     return false;
   } catch { return false; }

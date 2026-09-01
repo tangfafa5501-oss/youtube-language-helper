@@ -7,6 +7,7 @@ import type { RawCue } from '../lib/captions.ts';
 
 test('Bilibili URL/page parsing and WBI MD5 match known platform inputs', () => {
   assert.deepEqual(biliVideo('https://www.bilibili.com/video/BV1GJ411x7h7?p=2'), { bvid: 'BV1GJ411x7h7', page: 2 });
+  assert.deepEqual(biliVideo('https://www.bilibili.com/list/watchlater?oid=736809428&bvid=BV1YD4y1P7ou'), { bvid: 'BV1YD4y1P7ou', page: 1 });
   assert.equal(biliVideo('https://www.youtube.com/watch?v=abcdefghijk'), null);
   assert.deepEqual(biliVideo('https://www.bilibili.com/video/BV1GJ411x7h7?p=1.5'), { bvid: 'BV1GJ411x7h7', page: 1 });
   assert.deepEqual(biliVideo('https://www.bilibili.com/video/BV1GJ411x7h7?p=999999999'), { bvid: 'BV1GJ411x7h7', page: 1 });

@@ -43,11 +43,14 @@ test('only exact supported video URLs are connected', () => {
   assert.equal(supportedVideoUrl('https://www.youtube.com/watch?v=abcdefghijk'), true);
   assert.equal(supportedVideoUrl('https://www.bilibili.com/video/BV1GJ411x7h7?p=2'), true);
   assert.equal(supportedVideoUrl('https://www.bilibili.com/list/BV1GJ411x7h7'), true);
+  assert.equal(supportedVideoUrl('https://www.bilibili.com/list/watchlater?oid=736809428&bvid=BV1YD4y1P7ou'), true);
   for (const url of [
     'https://www.youtube.com/watchevil?v=abcdefghijk',
     'https://www.youtube.com/watch?v=short',
     'https://www.bilibili.com/videoevil/BV1GJ411x7h7',
     'https://www.bilibili.com/video/not-a-bvid',
+    'https://www.bilibili.com/list/watchlater?oid=736809428',
+    'https://www.bilibili.com/list/watchlater?bvid=not-a-bvid',
     'https://www.youtube.com.evil.test/watch?v=abcdefghijk',
   ]) assert.equal(supportedVideoUrl(url), false);
 });
