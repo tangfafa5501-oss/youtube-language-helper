@@ -156,7 +156,7 @@ test('word timing follows the actual Supadata response language rather than the 
   assert.equal(h.state().phrases[0].text, 'Hola mundo.');
   assert.equal(h.state().phrases[0].startMs, 1_000);
 });
-test('production timing keeps the period boundary, folds sub-2s forward, and caps rows at five seconds', async t => {
+test('production timing keeps the period boundary, folds sub-2s forward, and caps rows at six seconds', async t => {
   const h = await harness(t);
   const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
   const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
@@ -177,10 +177,10 @@ test('production timing keeps the period boundary, folds sub-2s forward, and cap
   assert.equal(h.state().phrases[0].text, first);
   assert.equal(h.state().phrases[1].text.startsWith('Today, I am'), true);
   assert.ok(h.state().phrases.every(phrase => phrase.endMs - phrase.startMs >= 2_000
-    && phrase.endMs - phrase.startMs <= 5_000));
+    && phrase.endMs - phrase.startMs <= 6_000));
   assert.equal(h.state().phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });
-test('failed YouTube word alignment still publishes hard 2-5 second SBD phrases from Supadata timing', async t => {
+test('failed YouTube word alignment still publishes hard 2-6 second SBD phrases from Supadata timing', async t => {
   const h = await harness(t);
   const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
   const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
@@ -196,11 +196,13 @@ test('failed YouTube word alignment still publishes hard 2-5 second SBD phrases 
   h.send({ ...binding, type: 'timing-load', language: 'en' });
   for (let i = 0; i < 50 && /正在尝试/.test(h.state().timingMessage ?? ''); i++) await tick();
   assert.equal(h.state().phrases[0].text, first);
-  assert.equal(h.state().phrases[1].text.startsWith('Today, I am'), true);
+  assert.equal(h.state().phrases[1].text, 'Today, I am very excited to help you pronounce 100 everyday words');
+  assert.equal(h.state().phrases[2].text, 'in my Modern Received Pronunciation accent.');
+  assert.ok(h.state().phrases[1].endMs - h.state().phrases[1].startMs > 5_000);
   assert.ok(h.state().phrases.every(phrase => phrase.timing === 'youtube-estimated'));
   assert.ok(h.state().phrases.every(phrase => {
     const duration = phrase.endMs - phrase.startMs;
-    return duration >= 2_000 && duration <= 5_000;
+    return duration >= 2_000 && duration <= 6_000;
   }));
   assert.doesNotMatch(h.state().timingMessage, /词级时间读取失败|保留原字幕/);
   assert.match(h.state().timingMessage, /词级时间不可用.*估算/);

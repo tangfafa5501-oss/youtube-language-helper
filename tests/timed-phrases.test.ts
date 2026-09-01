@@ -33,12 +33,12 @@ test('a long sentence tail receives its own word-level timestamp', () => {
   const timings = words.map((value, index) => word(value, index * 500, index * 500 + 500));
   const phrases = buildTimedPhrases([cue(text)], timings);
   assert.deepEqual(phrases.map(({ text: phrase, startMs, endMs }) => ({ phrase, startMs, endMs })), [
-    { phrase: 'Today, I am very excited to help you pronounce', startMs: 0, endMs: 4500 },
-    { phrase: '100 everyday words in my Modern Received Pronunciation accent.', startMs: 4500, endMs: 9000 },
+    { phrase: 'Today, I am very excited to help you pronounce 100 everyday words', startMs: 0, endMs: 6000 },
+    { phrase: 'in my Modern Received Pronunciation accent.', startMs: 6000, endMs: 9000 },
   ]);
 });
 
-test('sentence punctuation wins before five seconds and never absorbs the next sentence opening', () => {
+test('sentence punctuation wins before six seconds and never absorbs the next sentence opening', () => {
   const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
   const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
   const text = `${first} ${second}`;
@@ -50,7 +50,7 @@ test('sentence punctuation wins before five seconds and never absorbs the next s
   const phrases = buildTimedPhrases([cue(text)], timings);
   assert.equal(phrases[0]!.text, first);
   assert.equal(phrases[1]!.text.startsWith('Today, I am'), true);
-  assert.ok(phrases.every(phrase => phrase.endMs - phrase.startMs <= 5_000));
+  assert.ok(phrases.every(phrase => phrase.endMs - phrase.startMs <= 6_000));
   assert.equal(phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });
 
@@ -60,7 +60,7 @@ test('one unmatched semantic split word does not discard every SBD phrase', () =
   const timings = words.map((value, index) => word(value === 'words' ? 'terms' : value, index * 500, index * 500 + 500));
   const phrases = buildTimedPhrases([cue(text)], timings);
   assert.ok(phrases.length >= 2);
-  assert.ok(phrases.every(phrase => phrase.endMs - phrase.startMs <= 5_000));
+  assert.ok(phrases.every(phrase => phrase.endMs - phrase.startMs <= 6_000));
   assert.equal(phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });
 
@@ -114,10 +114,10 @@ test('a short phrase does not merge across a long silent gap', () => {
     word('go', 0, 800), word('continue', 5_000, 6_000), word('now', 6_000, 7_000),
   ]);
   assert.deepEqual(phrases.map(item => item.text), ['Go!', 'Continue now.']);
-  assert.ok(phrases.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 5_000));
+  assert.ok(phrases.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 6_000));
 });
 
-test('estimated Supadata fallback fixes the reported cross-sentence five-second chunks', () => {
+test('estimated Supadata fallback fixes the reported cross-sentence source chunks', () => {
   const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
   const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
   const cues: RawCue[] = [
@@ -125,10 +125,14 @@ test('estimated Supadata fallback fixes the reported cross-sentence five-second 
     { ...cue(second.replace(/^Today, I am\s*/, '')), cueId: 'reported:1', sourceIndex: 1, startMs: 5_000, endMs: 11_600 },
   ];
   const phrases = buildEstimatedTimedPhrases(cues);
-  assert.equal(phrases[0]!.text, first);
-  assert.equal(phrases[1]!.text.startsWith('Today, I am'), true);
+  assert.deepEqual(phrases.map(item => item.text), [
+    first,
+    'Today, I am very excited to help you pronounce 100 everyday words',
+    'in my Modern Received Pronunciation accent.',
+  ]);
+  assert.ok(phrases[1]!.endMs - phrases[1]!.startMs > 5_000);
   assert.ok(phrases.every(item => item.timing === 'youtube-estimated'));
-  assert.ok(phrases.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 5_000));
+  assert.ok(phrases.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 6_000));
   assert.equal(phrases.map(item => item.text).join(' ').replace(/\s/g, ''), `${first} ${second}`.replace(/\s/g, ''));
 });
 
@@ -139,24 +143,24 @@ test('estimated fallback pads a final short sentence instead of violating the tw
   assert.deepEqual(phrases.map(item => [item.startMs, item.endMs]), [[1_000, 3_000]]);
 });
 
-test('a sub-five-second unfinished sentence is not split at an internal reading pause', () => {
+test('a sub-six-second unfinished sentence combines adjacent reading lines', () => {
   const text = 'Here is the plan: practise every word carefully';
   const timings = text.match(/[A-Za-z]+/g)!.map((value, index, words) =>
-    word(value, index * (4_500 / words.length), (index + 1) * (4_500 / words.length)));
+    word(value, index * (5_800 / words.length), (index + 1) * (5_800 / words.length)));
   const phrases = buildTimedPhrases([cue(text)], timings);
   assert.deepEqual(phrases.map(item => item.text), [text]);
-  assert.equal(phrases[0]!.endMs - phrases[0]!.startMs, 4_500);
+  assert.equal(phrases[0]!.endMs - phrases[0]!.startMs, 5_800);
 });
 
-test('five seconds stays whole and only 5.001 seconds triggers an internal split', () => {
+test('six seconds stays whole and only 6.001 seconds triggers an internal split', () => {
   const text = 'Here is the plan: practise every word carefully now.';
   const build = (duration: number) => {
     const values = text.match(/[A-Za-z]+/g)!;
     return buildTimedPhrases([cue(text)], values.map((value, index) =>
       word(value, index * (duration / values.length), (index + 1) * (duration / values.length))));
   };
-  assert.deepEqual(build(5_000).map(item => item.text), [text]);
-  const over = build(5_001);
+  assert.deepEqual(build(6_000).map(item => item.text), [text]);
+  const over = build(6_001);
   assert.equal(over.length, 2);
-  assert.ok(over.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 5_000));
+  assert.ok(over.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 6_000));
 });

@@ -17,7 +17,7 @@ const normalize = (value: string) => value.toLocaleLowerCase('en-US').replace(/�
 const MAX_ALIGNMENT_CELLS = 50_000_000;
 const MAX_ALIGNMENT_TOKENS = 12_000;
 const MIN_PHRASE_MS = 2_000;
-const MAX_PHRASE_MS = 5_000;
+const MAX_PHRASE_MS = 6_000;
 
 function tokens(text: string, phrase: number): Token[] {
   return [...text.matchAll(tokenPattern)].map(match => ({ value: normalize(match[0]), phrase,
@@ -159,16 +159,16 @@ function buildAlignedTimedPhrases(cues: RawCue[], timings: WordTiming[],
     return { end, startMs: first.startMs, endMs, duration };
   };
   // Work backwards so an attractive punctuation boundary is used only when the
-  // remaining text can also be partitioned into hard 2-5 second rows.
+  // remaining text can also be partitioned into hard 2-6 second rows.
   const plan: Array<Candidate | null> = Array.from({ length: manual.length + 1 }, () => null);
   const reachable = new Uint8Array(manual.length + 1); reachable[manual.length] = 1;
   for (let start = manual.length - 1; start >= 0; start--) {
     const firstStart = manual[start]!.startMs;
     if (firstStart === undefined) continue;
-    const lastEnd = manual.at(-1)!.endMs;
-    const span = lastEnd === undefined ? MAX_PHRASE_MS : Math.max(0, lastEnd - firstStart);
-    const target = Math.min(MAX_PHRASE_MS, Math.max(MIN_PHRASE_MS,
-      span / Math.max(1, Math.ceil(span / MAX_PHRASE_MS))));
+    // Prefer the latest reachable reading boundary. This keeps a row close to
+    // six seconds and combines adjacent short reading lines whenever their
+    // total duration still fits, while reachable[end] guarantees a >=2s tail.
+    const target = MAX_PHRASE_MS;
     let best: Candidate | null = null, bestRank = Number.POSITIVE_INFINITY, bestDistance = Number.POSITIVE_INFINITY;
     for (let end = start + 1; end <= manual.length; end++) {
       const nextTokenStart = manual[end - 1]!.startMs;
@@ -185,13 +185,13 @@ function buildAlignedTimedPhrases(cues: RawCue[], timings: WordTiming[],
     }
     if (best) { plan[start] = best; reachable[start] = 1; }
   }
-  if (!reachable[0]) throw new Error('字幕未能对齐到严格的2至5秒词界');
+  if (!reachable[0]) throw new Error('字幕未能对齐到严格的2至6秒词界');
 
   const result: TimedPhrase[] = [];
   let start = 0, charStart = 0;
   while (start < manual.length) {
     const choice = plan[start];
-    if (!choice) throw new Error('字幕的2至5秒分段计划不完整');
+    if (!choice) throw new Error('字幕的2至6秒分段计划不完整');
     const charEnd = choice.end < manual.length ? manual[choice.end]!.charStart : display.length;
     const text = display.slice(charStart, charEnd).trim();
     if (!text) throw new Error('词级断句产生空文本');
@@ -203,7 +203,7 @@ function buildAlignedTimedPhrases(cues: RawCue[], timings: WordTiming[],
     throw new Error('词级断句未完整保留字幕文本');
   }
   if (result.some(item => item.endMs - item.startMs < MIN_PHRASE_MS || item.endMs - item.startMs > MAX_PHRASE_MS)) {
-    throw new Error('词级断句违反严格的2至5秒范围');
+    throw new Error('词级断句违反严格的2至6秒范围');
   }
   return result;
 }
@@ -236,7 +236,7 @@ function estimatedWordTimings(cues: RawCue[]): WordTiming[] {
     }
     cursorMs = startMs + duration;
   }
-  if (!result.length) throw new Error('字幕没有可用于2至5秒分段的文字');
+  if (!result.length) throw new Error('字幕没有可用于2至6秒分段的文字');
   return result;
 }
 
