@@ -79,15 +79,15 @@ function groupRun(cues: RawCue[]): CaptionGroup[] {
   }
   if (first < cues.length) append(cues.slice(first), '末尾按原条目时间保留');
 
-  // A <=2s sentence joins its successor. Continue only while the accumulated
-  // group remains <=2s; an isolated final short sentence is retained.
+  // Only a <2s sentence joins its successor. An exact two-second sentence is
+  // already within the accepted range; an isolated final short sentence stays.
   const merged: CaptionGroup[] = [];
   for (let i = 0; i < groups.length; i++) {
     const current = groups[i]!;
     const members = [...current.cues];
     let endMs = current.endMs, notice = current.notice;
     while (i + 1 < groups.length && current.startMs !== null && endMs !== null
-      && endMs - current.startMs <= 2000
+      && endMs - current.startMs < 2000
       && groups[i + 1]!.startMs !== null && groups[i + 1]!.startMs! - endMs <= MAX_SHORT_MERGE_GAP_MS) {
       const next = groups[++i]!;
       for (const cue of next.cues) members.push(cue);

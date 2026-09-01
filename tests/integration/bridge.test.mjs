@@ -151,12 +151,12 @@ test('word timing follows the actual Supadata response language rather than the 
     lang: 'es', content: [{ offset: 1_000, duration: 2_000, text: 'Hola mundo.' }],
   } });
   h.send({ ...binding, type: 'timing-load', language: 'en' });
-  for (let i = 0; i < 50 && !h.state().phrases?.length; i++) await tick();
+  for (let i = 0; i < 50 && h.state().phrases?.[0]?.timing !== 'youtube-word'; i++) await tick();
   assert.equal(new URL(h.fetched).searchParams.get('lang'), 'es');
   assert.equal(h.state().phrases[0].text, 'Hola mundo.');
   assert.equal(h.state().phrases[0].startMs, 1_000);
 });
-test('production timing keeps the period boundary, folds <=2s forward, and caps rows at five seconds', async t => {
+test('production timing keeps the period boundary, folds sub-2s forward, and caps rows at five seconds', async t => {
   const h = await harness(t);
   const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
   const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
@@ -173,11 +173,44 @@ test('production timing keeps the period boundary, folds <=2s forward, and caps 
     { offset: 5_000, duration: offsets.at(-1) + 450 - 5_000, text: second.replace(/^Today, I am\s*/, '') },
   ] } });
   h.send({ ...binding, type: 'timing-load', language: 'en' });
-  for (let i = 0; i < 50 && !h.state().phrases?.length; i++) await tick();
+  for (let i = 0; i < 50 && /正在尝试/.test(h.state().timingMessage ?? ''); i++) await tick();
   assert.equal(h.state().phrases[0].text, first);
   assert.equal(h.state().phrases[1].text.startsWith('Today, I am'), true);
-  assert.ok(h.state().phrases.every(phrase => phrase.endMs - phrase.startMs <= 5_000));
+  assert.ok(h.state().phrases.every(phrase => phrase.endMs - phrase.startMs >= 2_000
+    && phrase.endMs - phrase.startMs <= 5_000));
   assert.equal(h.state().phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
+});
+test('failed YouTube word alignment still publishes hard 2-5 second SBD phrases from Supadata timing', async t => {
+  const h = await harness(t);
+  const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
+  const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
+  h.setWordBody(JSON.stringify({ events: [{ tStartMs: 0, dDurationMs: 2_000, segs: [
+    { utf8: 'completely', tOffsetMs: 0 }, { utf8: ' unrelated', tOffsetMs: 1_000 },
+  ] }] }));
+  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'estimated-two-five' };
+  h.send({ ...binding, type: 'supadata-begin' });
+  h.send({ ...binding, type: 'supadata-finish', requestedLanguage: 'en', data: { lang: 'en', content: [
+    { offset: 0, duration: 5_000, text: `${first} Today, I am` },
+    { offset: 5_000, duration: 6_600, text: second.replace(/^Today, I am\s*/, '') },
+  ] } });
+  h.send({ ...binding, type: 'timing-load', language: 'en' });
+  for (let i = 0; i < 50 && /正在尝试/.test(h.state().timingMessage ?? ''); i++) await tick();
+  assert.equal(h.state().phrases[0].text, first);
+  assert.equal(h.state().phrases[1].text.startsWith('Today, I am'), true);
+  assert.ok(h.state().phrases.every(phrase => phrase.timing === 'youtube-estimated'));
+  assert.ok(h.state().phrases.every(phrase => {
+    const duration = phrase.endMs - phrase.startMs;
+    return duration >= 2_000 && duration <= 5_000;
+  }));
+  assert.doesNotMatch(h.state().timingMessage, /词级时间读取失败|保留原字幕/);
+  assert.match(h.state().timingMessage, /词级时间不可用.*估算/);
+  assert.equal(h.state().phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), `${first} ${second}`.replace(/\s/g, ''));
+  const target = h.state().phrases[1];
+  h.send({ version: 1, type: 'seek', phraseId: target.id, playMode: 'single',
+    videoId: h.state().video.videoId, session: h.state().video.session });
+  await tick();
+  assert.equal(h.video.currentTime, target.startMs / 1_000);
+  assert.equal(h.plays, 1);
 });
 test('single, loop, and all playback modes enforce Enjoy-compatible segment boundaries', async t => {
   const h = await harness(t); providerCues(h, [1_000, 2_000, 3_000]);

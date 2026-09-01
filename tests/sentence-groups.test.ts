@@ -19,13 +19,13 @@ test('SBD crosses raw cue boundaries, protects abbreviations, and preserves all 
   assert.deepEqual(groups.flatMap(g => g.cues), cues); assert.deepEqual(cues, before);
 });
 
-test('<=2s joins forward repeatedly; >2s and the final short sentence are retained', () => {
+test('only sub-2s groups join forward; exact 2s, longer groups, and the final short sentence remain', () => {
   const groups = groupSentences(fixture([
     ['One!', 0, 1000], ['Two!', 1000, 1000], ['Three!', 2000, 500],
     ['Four!', 3000, 2001], ['Five!', 6000, 2000], ['Six!', 8000, 3000], ['End!', 11000, 200],
   ]));
-  assert.deepEqual(groups.map(g => g.text), ['One! Two! Three!', 'Four!', 'Five! Six!', 'End!']);
-  assert.deepEqual(groups.map(g => [g.startMs, g.endMs]), [[0, 2500], [3000, 5001], [6000, 11000], [11000, 11200]]);
+  assert.deepEqual(groups.map(g => g.text), ['One! Two!', 'Three! Four!', 'Five!', 'Six!', 'End!']);
+  assert.deepEqual(groups.map(g => [g.startMs, g.endMs]), [[0, 2000], [2000, 5001], [6000, 8000], [8000, 11000], [11000, 11200]]);
 });
 
 test('a short caption remains separate when the next sentence starts after a long silence', () => {
@@ -96,7 +96,7 @@ test('439 unpunctuated synthetic cues spanning 21 minutes are not interpreted as
   assert.ok(groups.every(g => /缺少句末标点/.test(g.notice ?? '')));
 });
 
-test('unpunctuated tail after a real sentence falls back locally, while <=2s fragments still join forward', () => {
+test('unpunctuated tail after a real sentence falls back locally, while sub-2s fragments still join forward', () => {
   const cues = fixture([['This sentence ends here.', 0, 3000],
     ['short fragment', 3000, 1000], ['next fragment', 4000, 3000], ['another fragment', 7000, 3000]]);
   const groups = groupSentences(cues);

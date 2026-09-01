@@ -7,7 +7,7 @@ export type TimedPhrase = {
   text: string;
   startMs: number;
   endMs: number;
-  timing: 'youtube-word' | 'bilibili-cue';
+  timing: 'youtube-word' | 'youtube-estimated' | 'bilibili-cue';
 };
 
 type Token = { value: string; phrase: number; charStart: number; charEnd: number;
@@ -16,7 +16,6 @@ const tokenPattern = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
 const normalize = (value: string) => value.toLocaleLowerCase('en-US').replace(/’/g, "'");
 const MAX_ALIGNMENT_CELLS = 50_000_000;
 const MAX_ALIGNMENT_TOKENS = 12_000;
-const MAX_SHORT_MERGE_GAP_MS = 1_500;
 const MIN_PHRASE_MS = 2_000;
 const MAX_PHRASE_MS = 5_000;
 
@@ -117,7 +116,8 @@ function timedTextPlan(cues: RawCue[]) {
   return { display, manual, sentenceEnds, phraseEnds };
 }
 
-export function buildTimedPhrases(cues: RawCue[], timings: WordTiming[]): TimedPhrase[] {
+function buildAlignedTimedPhrases(cues: RawCue[], timings: WordTiming[],
+  timingSource: 'youtube-word' | 'youtube-estimated'): TimedPhrase[] {
   for (let index = 0; index < timings.length; index++) {
     const timing = timings[index]!;
     if (!Number.isFinite(timing.startMs) || !Number.isFinite(timing.endMs) || timing.startMs < 0 || timing.endMs <= timing.startMs
@@ -145,52 +145,103 @@ export function buildTimedPhrases(cues: RawCue[], timings: WordTiming[]): TimedP
     if (!first || !last || first.startMs === undefined || last.endMs === undefined || last.endMs <= first.startMs) return null;
     const matched = matchedPrefix[end]! - matchedPrefix[start]!;
     if (matched < Math.max(1, Math.ceil((end - start) * .6))) return null;
-    if (end < manual.length && manual[end]!.startMs === undefined) return null;
-    return { end, startMs: first.startMs, endMs: last.endMs, duration: last.endMs - first.startMs };
+    const nextStart = end < manual.length ? manual[end]!.startMs : undefined;
+    if (end < manual.length && nextStart === undefined) return null;
+    let endMs = last.endMs;
+    if (endMs - first.startMs < MIN_PHRASE_MS) {
+      const paddedEnd = first.startMs + MIN_PHRASE_MS;
+      if (nextStart !== undefined && paddedEnd > nextStart) return null;
+      endMs = paddedEnd;
+    }
+    const duration = endMs - first.startMs;
+    if (duration < MIN_PHRASE_MS || duration > MAX_PHRASE_MS
+      || nextStart !== undefined && endMs > nextStart) return null;
+    return { end, startMs: first.startMs, endMs, duration };
   };
+  // Work backwards so an attractive punctuation boundary is used only when the
+  // remaining text can also be partitioned into hard 2-5 second rows.
+  const plan: Array<Candidate | null> = Array.from({ length: manual.length + 1 }, () => null);
+  const reachable = new Uint8Array(manual.length + 1); reachable[manual.length] = 1;
+  for (let start = manual.length - 1; start >= 0; start--) {
+    const firstStart = manual[start]!.startMs;
+    if (firstStart === undefined) continue;
+    const lastEnd = manual.at(-1)!.endMs;
+    const span = lastEnd === undefined ? MAX_PHRASE_MS : Math.max(0, lastEnd - firstStart);
+    const target = Math.min(MAX_PHRASE_MS, Math.max(MIN_PHRASE_MS,
+      span / Math.max(1, Math.ceil(span / MAX_PHRASE_MS))));
+    let best: Candidate | null = null, bestRank = Number.POSITIVE_INFINITY, bestDistance = Number.POSITIVE_INFINITY;
+    for (let end = start + 1; end <= manual.length; end++) {
+      const nextTokenStart = manual[end - 1]!.startMs;
+      if (nextTokenStart !== undefined && nextTokenStart - firstStart > MAX_PHRASE_MS) break;
+      if (!reachable[end]) continue;
+      const choice = candidate(start, end);
+      if (!choice) continue;
+      const rank = sentenceEnds.has(end) ? 0 : phraseEnds.has(end) ? 1 : 2;
+      const distance = Math.abs(choice.duration - target);
+      const earlierSentenceBoundary = rank === bestRank && rank === 0 && best !== null && choice.end < best.end;
+      if (rank < bestRank || earlierSentenceBoundary || rank === bestRank && rank > 0 && distance < bestDistance) {
+        best = choice; bestRank = rank; bestDistance = distance;
+      }
+    }
+    if (best) { plan[start] = best; reachable[start] = 1; }
+  }
+  if (!reachable[0]) throw new Error('字幕未能对齐到严格的2至5秒词界');
+
   const result: TimedPhrase[] = [];
   let start = 0, charStart = 0;
   while (start < manual.length) {
-    let sentenceChoice: Candidate | null = null, phraseChoice: Candidate | null = null;
-    let wordChoice: Candidate | null = null, finalChoice: Candidate | null = null;
-    const remaining = candidate(start, manual.length);
-    const balancedTarget = remaining && remaining.duration > MAX_PHRASE_MS
-      ? remaining.duration / Math.ceil(remaining.duration / MAX_PHRASE_MS) : MAX_PHRASE_MS;
-    for (let end = start + 1; end <= manual.length; end++) {
-      const last = manual[end - 1]!;
-      if (last.endMs === undefined) continue;
-      const firstStart = manual[start]!.startMs;
-      if (firstStart !== undefined && last.endMs - firstStart > MAX_PHRASE_MS) break;
-      const choice = candidate(start, end);
-      if (!choice) continue;
-      const nextStart = end < manual.length ? manual[end]!.startMs : undefined;
-      const separatedByGap = nextStart !== undefined && nextStart - choice.endMs > MAX_SHORT_MERGE_GAP_MS;
-      if (end === manual.length) finalChoice = choice;
-      if (choice.duration <= MIN_PHRASE_MS && !separatedByGap && end < manual.length) continue;
-      if (sentenceEnds.has(end)) { sentenceChoice = choice; break; }
-      if ((phraseEnds.has(end) || separatedByGap) && !phraseChoice) phraseChoice = choice;
-      if (!wordChoice || Math.abs(choice.duration - balancedTarget) < Math.abs(wordChoice.duration - balancedTarget)) {
-        wordChoice = choice;
-      }
-    }
-    const choice = sentenceChoice ?? phraseChoice ?? wordChoice ?? finalChoice;
-    if (!choice) throw new Error('字幕未能对齐到五秒内的可靠词界，已保留原字幕而未猜测时间');
+    const choice = plan[start];
+    if (!choice) throw new Error('字幕的2至5秒分段计划不完整');
     const charEnd = choice.end < manual.length ? manual[choice.end]!.charStart : display.length;
     const text = display.slice(charStart, charEnd).trim();
-    if (!text) throw new Error('词级断句产生空文本，已保留原字幕');
+    if (!text) throw new Error('词级断句产生空文本');
     result.push({ id: `phrase:${result.length}:${choice.startMs}`, text,
-      startMs: choice.startMs, endMs: choice.endMs, timing: 'youtube-word' });
+      startMs: choice.startMs, endMs: choice.endMs, timing: timingSource });
     start = choice.end; charStart = charEnd;
   }
-  for (let i = 0; i + 1 < result.length; i++) {
-    if (result[i + 1]!.startMs > result[i]!.startMs && result[i]!.endMs > result[i + 1]!.startMs) {
-      result[i]!.endMs = result[i + 1]!.startMs;
-    }
-  }
   if (result.map(item => item.text).join('').replace(/\s/gu, '') !== display.replace(/\s/gu, '')) {
-    throw new Error('词级断句未完整保留字幕文本，已回退原字幕');
+    throw new Error('词级断句未完整保留字幕文本');
+  }
+  if (result.some(item => item.endMs - item.startMs < MIN_PHRASE_MS || item.endMs - item.startMs > MAX_PHRASE_MS)) {
+    throw new Error('词级断句违反严格的2至5秒范围');
   }
   return result;
+}
+
+export function buildTimedPhrases(cues: RawCue[], timings: WordTiming[]): TimedPhrase[] {
+  return buildAlignedTimedPhrases(cues, timings, 'youtube-word');
+}
+
+// Supadata supplies canonical cue starts/ends but not word offsets. When the
+// independent YouTube word track cannot be aligned, distribute the cue span
+// deterministically over its own words. This is explicitly labelled estimated;
+// starts remain anchored to the source cue timeline and no text is rewritten.
+function estimatedWordTimings(cues: RawCue[]): WordTiming[] {
+  const result: WordTiming[] = [];
+  let cursorMs = 0;
+  for (const cue of cues) {
+    const cueTokens = tokens(cue.text, -1);
+    if (!cueTokens.length) continue;
+    const valid = cue.startMs !== null && cue.endMs !== null && Number.isFinite(cue.startMs) && Number.isFinite(cue.endMs)
+      && cue.startMs >= 0 && cue.endMs > cue.startMs;
+    const sourceStart = valid ? cue.startMs! : cursorMs;
+    const startMs = Math.max(cursorMs, sourceStart);
+    const duration = valid ? cue.endMs! - cue.startMs! : Math.max(MIN_PHRASE_MS, cueTokens.length * 450);
+    const unit = duration / cueTokens.length;
+    for (let index = 0; index < cueTokens.length; index++) {
+      const wordStart = startMs + unit * index;
+      const slotEnd = startMs + unit * (index + 1);
+      result.push({ text: cueTokens[index]!.value, startMs: wordStart,
+        endMs: Math.min(slotEnd, wordStart + MAX_PHRASE_MS) });
+    }
+    cursorMs = startMs + duration;
+  }
+  if (!result.length) throw new Error('字幕没有可用于2至5秒分段的文字');
+  return result;
+}
+
+export function buildEstimatedTimedPhrases(cues: RawCue[]): TimedPhrase[] {
+  return buildAlignedTimedPhrases(cues, estimatedWordTimings(cues), 'youtube-estimated');
 }
 
 export function phraseTextsFromCues(cues: RawCue[]): string[] {

@@ -2,7 +2,7 @@ import { parseJson3, parseJson3WordTimings, record, watchVideoId } from '../lib/
 import { CHANNEL, PORT, emptyState, isPlaybackRate, isVideoInfo, type State } from '../lib/protocol';
 import { SessionGate } from '../lib/session';
 import { parseSupadata, validLanguage } from '../lib/supadata';
-import { buildTimedPhrases } from '../lib/timed-phrases';
+import { buildEstimatedTimedPhrases, buildTimedPhrases } from '../lib/timed-phrases';
 
 export default defineContentScript({
   matches: ['https://www.youtube.com/*'], runAt: 'document_start',
@@ -154,18 +154,22 @@ export default defineContentScript({
       if (!clients.has(port) || !v || state.status !== 'loaded' || state.source !== 'supadata'
         || message.videoId !== v.videoId || message.session !== v.session || state.trackId !== `supadata:${message.requestId}`
         || !timingLanguage || watchVideoId(location.href) !== v.videoId) return;
-      const token = gate.capture(); state = { ...state, phrases: [], timingMessage: '正在读取 YouTube 自动轨词级时间…' }; publish();
+      const token = gate.capture();
+      const estimatedPhrases = buildEstimatedTimedPhrases(state.cues);
+      state = { ...state, phrases: estimatedPhrases, message: '字幕与估算语段时间已就绪',
+        timingMessage: `已按 Supadata 原始时间估算 ${estimatedPhrases.length} 个严格2至5秒语段；正在尝试用 YouTube 词级时间校准` };
+      publish();
       try {
         const r = await request('word-timing', { videoId: v.videoId, session: v.session, language: timingLanguage });
         if (!gate.current(token) || !clients.has(port) || state.video?.session !== v.session || state.trackId !== `supadata:${message.requestId}`) return;
         if (r.videoId !== v.videoId || r.session !== v.session || typeof r.body !== 'string') throw new Error('词级时间响应会话不匹配');
         const phrases = buildTimedPhrases(state.cues, parseJson3WordTimings(r.body));
         state = { ...state, phrases, message: '字幕与独立语段时间已就绪',
-          timingMessage: `已用 YouTube 自动轨词级时间生成 ${phrases.length} 个语段；SBD句界优先，≤2秒向后合并，长句按5秒上限拆分` };
-      } catch (error) {
+          timingMessage: `已用 YouTube 自动轨词级时间生成 ${phrases.length} 个严格2至5秒语段；SBD句界优先，不足2秒向后合并，超过5秒拆分` };
+      } catch {
         if (!gate.current(token)) return;
-        state = { ...state, phrases: [], message: '字幕已读取；独立语段时间不可用',
-          timingMessage: `词级时间读取失败：${(error as Error).message}` };
+        state = { ...state, phrases: estimatedPhrases, message: '字幕与估算语段时间已就绪',
+          timingMessage: `YouTube 词级时间不可用；已按 Supadata 原始时间估算 ${estimatedPhrases.length} 个严格2至5秒语段，句界优先` };
       }
       publish();
     }

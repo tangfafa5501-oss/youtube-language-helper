@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { RawCue, WordTiming } from '../lib/captions.ts';
-import { buildTimedPhrases } from '../lib/timed-phrases.ts';
+import { buildEstimatedTimedPhrases, buildTimedPhrases } from '../lib/timed-phrases.ts';
 
 const cue = (text: string): RawCue => ({ cueId: 'manual:0', sourceIndex: 0, text,
   startMs: 0, endMs: 6000, timingSource: 'offset+duration', timingIssue: null, raw: {} });
@@ -17,7 +17,7 @@ test('punctuated manual phrases receive independent YouTube word starts', () => 
   ]);
 });
 
-test('a <=2 second phrase merges forward and spelling substitutions still align', () => {
+test('a sub-2 second phrase merges forward and spelling substitutions still align', () => {
   const phrases = buildTimedPhrases([cue('Practise. Start now.')], [
     word('practice', 100, 700), word(' start', 900, 1600), word(' now', 1600, 3500),
   ]);
@@ -102,11 +102,11 @@ test('pathological alignment size is rejected before allocating an unbounded edi
   assert.throws(() => buildTimedPhrases([cue('Word.')], timings), /规模过大/);
 });
 
-test('phrase ends keep the last spoken word boundary instead of stretching across silence', () => {
+test('isolated short phrases extend into silence to satisfy the hard two-second minimum', () => {
   const phrases = buildTimedPhrases([cue('First phrase. Second phrase.')], [
     word('first', 0, 400), word('phrase', 400, 1_000), word('second', 5_000, 5_400), word('phrase', 5_400, 6_000),
   ]);
-  assert.deepEqual(phrases.map(item => [item.startMs, item.endMs]), [[0, 1_000], [5_000, 6_000]]);
+  assert.deepEqual(phrases.map(item => [item.startMs, item.endMs]), [[0, 2_000], [5_000, 7_000]]);
 });
 
 test('a short phrase does not merge across a long silent gap', () => {
@@ -114,4 +114,49 @@ test('a short phrase does not merge across a long silent gap', () => {
     word('go', 0, 800), word('continue', 5_000, 6_000), word('now', 6_000, 7_000),
   ]);
   assert.deepEqual(phrases.map(item => item.text), ['Go!', 'Continue now.']);
+  assert.ok(phrases.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 5_000));
+});
+
+test('estimated Supadata fallback fixes the reported cross-sentence five-second chunks', () => {
+  const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
+  const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
+  const cues: RawCue[] = [
+    { ...cue(`${first} Today, I am`), cueId: 'reported:0', startMs: 0, endMs: 5_000 },
+    { ...cue(second.replace(/^Today, I am\s*/, '')), cueId: 'reported:1', sourceIndex: 1, startMs: 5_000, endMs: 11_600 },
+  ];
+  const phrases = buildEstimatedTimedPhrases(cues);
+  assert.equal(phrases[0]!.text, first);
+  assert.equal(phrases[1]!.text.startsWith('Today, I am'), true);
+  assert.ok(phrases.every(item => item.timing === 'youtube-estimated'));
+  assert.ok(phrases.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 5_000));
+  assert.equal(phrases.map(item => item.text).join(' ').replace(/\s/g, ''), `${first} ${second}`.replace(/\s/g, ''));
+});
+
+test('estimated fallback pads a final short sentence instead of violating the two-second minimum', () => {
+  const phrases = buildEstimatedTimedPhrases([{
+    ...cue('Done.'), startMs: 1_000, endMs: 1_600,
+  }]);
+  assert.deepEqual(phrases.map(item => [item.startMs, item.endMs]), [[1_000, 3_000]]);
+});
+
+test('a sub-five-second unfinished sentence is not split at an internal reading pause', () => {
+  const text = 'Here is the plan: practise every word carefully';
+  const timings = text.match(/[A-Za-z]+/g)!.map((value, index, words) =>
+    word(value, index * (4_500 / words.length), (index + 1) * (4_500 / words.length)));
+  const phrases = buildTimedPhrases([cue(text)], timings);
+  assert.deepEqual(phrases.map(item => item.text), [text]);
+  assert.equal(phrases[0]!.endMs - phrases[0]!.startMs, 4_500);
+});
+
+test('five seconds stays whole and only 5.001 seconds triggers an internal split', () => {
+  const text = 'Here is the plan: practise every word carefully now.';
+  const build = (duration: number) => {
+    const values = text.match(/[A-Za-z]+/g)!;
+    return buildTimedPhrases([cue(text)], values.map((value, index) =>
+      word(value, index * (duration / values.length), (index + 1) * (duration / values.length))));
+  };
+  assert.deepEqual(build(5_000).map(item => item.text), [text]);
+  const over = build(5_001);
+  assert.equal(over.length, 2);
+  assert.ok(over.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 5_000));
 });
