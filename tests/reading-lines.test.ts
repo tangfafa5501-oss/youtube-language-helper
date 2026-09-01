@@ -83,3 +83,29 @@ test('a long clause splits before a substantial prepositional tail', () => {
   ]);
   assert.deepEqual(readingLines('She lives in the house.'), ['She lives in the house.']);
 });
+
+test('long colon and conjunction pauses become lines while times, URLs and short clauses stay intact', () => {
+  assert.deepEqual(readingLines('Here is the plan: practise the first group slowly and clearly.'),
+    ['Here is the plan:', 'practise the first group slowly and clearly.']);
+  assert.deepEqual(readingLines('We reviewed every example from the first chapter to the final appendix and then repeated the difficult passages together.'), [
+    'We reviewed every example from the first chapter to the final appendix',
+    'and then repeated the difficult passages together.',
+  ]);
+  assert.deepEqual(readingLines('Meet me at 10:30 and open https://example.com:443/docs.'),
+    ['Meet me at 10:30 and open https://example.com:443/docs.']);
+});
+
+test('commas inside curly single quotes and bracketed asides do not create false outer clauses', () => {
+  assert.deepEqual(readingLines('She called it ‘clear, practical, and useful’ before leaving.'),
+    ['She called it ‘clear, practical, and useful’ before leaving.']);
+  assert.deepEqual(readingLines('We finished the first exercise [an unusual, but useful, warm-up], and continued.'), [
+    'We finished the first exercise', '[an unusual, but useful, warm-up],', 'and continued.',
+  ]);
+});
+
+test('pathological display text skips expensive phrasing without dropping source characters', () => {
+  const text = `${'word '.repeat(40_001)}end.`;
+  const lines = readingLines(text);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0], text.trim());
+});

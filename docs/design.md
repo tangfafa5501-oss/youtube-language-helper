@@ -1,4 +1,4 @@
-# YouTube Language Helper 设计稿
+# Video Language Helper 设计稿
 
 2026-09-01 范围更新：用户在 Enjoy 主流程对齐后追加 B 站。B 站使用官方 `view + WBI player + subtitle JSON` 链路，优先网站现成双语轨，不新翻译。它只有 cue 级 `from/to`；句界在 cue 内时保留原 cue，不估算新时间。同一 Enjoy 式播放状态机服务两个站点。原文中“暂不开发 B 站”的早期限制被本次明确追加要求覆盖。
 
@@ -128,7 +128,7 @@ Supadata 条目来源必须单独标记。只保留服务响应顺序、文本�
 
 ## 6. 权限与隐私
 
-- 仅匹配 YouTube 目标页面；具体页面范围、iframe 策略和最低浏览器版本在 M0 实测后确定。
+- 仅匹配合法 YouTube `/watch?v=` 与 B站 `/video/`、`/list/` 视频页面；只连接顶层页面，最低 Chrome 版本为 120。
 - 基础权限拟为 sidePanel、storage 和必要的网站访问权限。是否需要 tabs、scripting、webRequest 逐项证明，不默认索取全站权限。
 - DeepSeek 域名访问在用户启用 AI 时申请，拒绝后仍可用英文字幕和播放功能。
 - 不复制 Enjoy 的商店公钥、更新地址、内部开发地址、账号同步或遥测配置。

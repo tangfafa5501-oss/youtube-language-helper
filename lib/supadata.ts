@@ -10,13 +10,15 @@ export function transcriptUrl(videoId: string, language: string) {
 }
 
 export function parseSupadata(data: unknown) {
+  let size = Number.POSITIVE_INFINITY;
+  try { size = JSON.stringify(data).length; } catch { /* malformed non-JSON input */ }
   if (!record(data) || !Array.isArray(data.content) || !data.content.length || data.content.length > 40_000
-    || !validLanguage(data.lang) || JSON.stringify(data).length > 8_000_000) {
+    || !validLanguage(data.lang) || size > 8_000_000) {
     throw new SupadataError('Supadata 未返回可用的带时间戳条目，未当作读取成功');
   }
   const language = data.lang;
   const cues: RawCue[] = data.content.map((row, index) => {
-    if (!record(row) || typeof row.text !== 'string') throw new SupadataError('Supadata 文本条目结构异常');
+    if (!record(row) || typeof row.text !== 'string' || row.text.length > 200_000) throw new SupadataError('Supadata 文本条目结构异常或过长');
     const startMs = typeof row.offset === 'number' && Number.isFinite(row.offset) && row.offset >= 0 ? row.offset : null;
     const duration = typeof row.duration === 'number' && Number.isFinite(row.duration) && row.duration >= 0 ? row.duration : null;
     const sum = startMs !== null && duration !== null ? startMs + duration : null;
@@ -56,8 +58,10 @@ async function requestJson(url: string, key: string, signal: AbortSignal, fetche
 }
 export async function testSupadata(key: string, signal: AbortSignal, fetcher = fetch) {
   const { data } = await requestJson('https://api.supadata.ai/v1/me', key, signal, fetcher);
-  if (!record(data) || typeof data.plan !== 'string' || typeof data.maxCredits !== 'number' || typeof data.usedCredits !== 'number'
-    || !Number.isFinite(data.maxCredits) || !Number.isFinite(data.usedCredits)) throw new SupadataError('账户接口响应结构异常');
+  if (!record(data) || typeof data.plan !== 'string' || !data.plan.trim() || data.plan.length > 100
+    || typeof data.maxCredits !== 'number' || typeof data.usedCredits !== 'number'
+    || !Number.isSafeInteger(data.maxCredits) || !Number.isSafeInteger(data.usedCredits)
+    || data.maxCredits < 0 || data.usedCredits < 0) throw new SupadataError('账户接口响应结构异常');
   // Never return account identity or the key to the UI.
   return { plan: data.plan.slice(0, 100), maxCredits: data.maxCredits, usedCredits: data.usedCredits };
 }

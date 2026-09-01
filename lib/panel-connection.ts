@@ -14,11 +14,27 @@ export type ConnectionApi = {
   lastError(): string | undefined;
   activated: Listener<[{ tabId: number; windowId: number }]>;
   updated: Listener<[number, { status?: string }]>;
+  handshakeTimeoutMs?: number;
 };
 export type ConnectionCallbacks = {
   reset(message: string, error?: boolean): void;
   message(message: unknown, tabId: number): void;
+  handshake?(message: unknown): boolean;
 };
+
+export function supportedVideoUrl(value: string | undefined) {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    if (url.origin === 'https://www.youtube.com') {
+      return url.pathname === '/watch' && /^[\w-]{11}$/.test(url.searchParams.get('v') ?? '');
+    }
+    if (url.origin === 'https://www.bilibili.com') {
+      return /^\/(?:video|list)\/BV[0-9A-Za-z]{10}(?:\/|$)/.test(url.pathname);
+    }
+    return false;
+  } catch { return false; }
+}
 
 // Page reload destroys the content-script Port. Rebind on that tab's completion,
 // not on unrelated tabs, and never let a late old-port callback clear a new one.
@@ -52,7 +68,7 @@ export function connectPanel(api: ConnectionApi, callbacks: ConnectionCallbacks)
       if (!active || tabId === undefined) { callbacks.reset('没有找到当前标签页', true); return; }
       // URL is omitted without matching host permissions. Do not request tabs
       // permission just to inspect unrelated sites.
-      if (!active.url || !/^https:\/\/www\.(?:youtube\.com\/watch|bilibili\.com\/(?:video|list)\/)/.test(active.url)) {
+      if (!supportedVideoUrl(active.url)) {
         callbacks.reset('请切换到 YouTube 或 B 站视频页，再点击重新连接'); return;
       }
       const boundTabId = tabId;
@@ -60,7 +76,7 @@ export function connectPanel(api: ConnectionApi, callbacks: ConnectionCallbacks)
       const current = () => !disposed && generation === token && port === next;
       const message = (value: unknown) => {
         if (!current()) return;
-        clearTimeout(handshake);
+        if (!callbacks.handshake || callbacks.handshake(value)) clearTimeout(handshake);
         callbacks.message(value, boundTabId);
       };
       const disconnect = () => {
@@ -75,7 +91,7 @@ export function connectPanel(api: ConnectionApi, callbacks: ConnectionCallbacks)
       removePortListeners = () => { next.onMessage.removeListener(message); next.onDisconnect.removeListener(disconnect); };
       handshake = setTimeout(() => {
         if (current()) fail('连接未收到内容脚本应答。请检查扩展的视频网站访问权限，刷新视频后重试。');
-      }, 5000);
+      }, api.handshakeTimeoutMs ?? 5000);
     } catch (error) {
       if (!disposed && token === generation) fail(`连接失败：${error instanceof Error ? error.message.slice(0, 500) : '未知错误'}`);
     }

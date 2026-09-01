@@ -6,6 +6,7 @@ import type { TimedPhrase } from './timed-phrases.ts';
 export type BiliTrack = { id: string; name: string; language: string; kind: 'manual' | 'asr'; url: string;
   secondary?: { id: string; name: string; language: string; url: string } };
 const MAX_BILI_PHRASE_MS = 6_000;
+const MAX_BILI_RESPONSE_BYTES = 8_000_000;
 const BVID_ALPHABET = 'FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf';
 const BVID_XOR = 23_442_827_791_579n;
 const MAX_AID = 1n << 51n;
@@ -34,34 +35,52 @@ function subtitleUrl(value: unknown) {
   } catch { return null; }
 }
 export function isBiliTrack(value: unknown): value is BiliTrack {
-  if (!record(value) || typeof value.id !== 'string' || value.id.length > 500 || typeof value.name !== 'string' || value.name.length > 500
+  if (!record(value) || typeof value.id !== 'string' || !value.id || value.id.length > 500 || typeof value.name !== 'string' || value.name.length > 500
     || typeof value.language !== 'string' || value.language.length > 100 || (value.kind !== 'manual' && value.kind !== 'asr') || subtitleUrl(value.url) !== value.url) return false;
   if (value.secondary === undefined) return true;
-  return record(value.secondary) && typeof value.secondary.id === 'string' && value.secondary.id.length <= 500
+  return record(value.secondary) && typeof value.secondary.id === 'string' && !!value.secondary.id && value.secondary.id !== value.id && value.secondary.id.length <= 500
     && typeof value.secondary.name === 'string' && value.secondary.name.length <= 500
     && typeof value.secondary.language === 'string' && value.secondary.language.length <= 100
-    && subtitleUrl(value.secondary.url) === value.secondary.url;
+    && subtitleUrl(value.secondary.url) === value.secondary.url && value.secondary.url !== value.url;
 }
 export function biliVideo(url: string) {
   try {
     const parsed = new URL(url); if (parsed.origin !== 'https://www.bilibili.com') return null;
     const bvid = parsed.href.match(/BV[0-9A-Za-z]{10}/)?.[0]; if (!bvid) return null;
-    const page = Math.max(1, Number(parsed.searchParams.get('p')) || 1); return { bvid, page };
+    const requestedPage = Number(parsed.searchParams.get('p'));
+    const page = Number.isSafeInteger(requestedPage) && requestedPage >= 1 && requestedPage <= 100_000 ? requestedPage : 1;
+    return { bvid, page };
   } catch { return null; }
 }
+async function boundedJson(response: Response) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('B站接口没有响应体');
+  const decoder = new TextDecoder(); let text = '', bytes = 0;
+  while (true) {
+    const chunk = await reader.read(); if (chunk.done) break;
+    bytes += chunk.value.byteLength;
+    if (bytes > MAX_BILI_RESPONSE_BYTES) { await reader.cancel(); throw new Error('B站响应过大，已停止读取'); }
+    text += decoder.decode(chunk.value, { stream: true });
+  }
+  text += decoder.decode();
+  try { return JSON.parse(text) as unknown; } catch { throw new Error('B站接口返回的不是有效 JSON'); }
+}
 async function envelope(url: string, signal?: AbortSignal) {
-  const response = await fetch(url, { credentials: 'include', signal, headers: { Accept: 'application/json' } });
+  const response = await fetch(url, { credentials: 'include', signal, redirect: 'error', cache: 'no-store', headers: { Accept: 'application/json' } });
   if (!response.ok) throw new Error(response.status === 429 ? 'B 站请求过于频繁，已停止自动重试；请稍后刷新视频' : `B站接口请求失败：HTTP ${response.status}`);
-  const payload: unknown = await response.json();
-  if (!record(payload) || payload.code !== 0 || !record(payload.data)) throw new Error(typeof payload === 'object' && payload && 'message' in payload ? String(payload.message) : 'B站接口返回异常');
+  const payload = await boundedJson(response);
+  if (!record(payload) || payload.code !== 0 || !record(payload.data)) throw new Error(typeof payload === 'object' && payload && 'message' in payload
+    ? String(payload.message).slice(0, 500) : 'B站接口返回异常');
   return payload.data;
 }
 export async function biliMetadata(bvid: string, page: number, signal?: AbortSignal) {
+  if (!/^BV1[0-9A-Za-z]{9}$/.test(bvid) || !Number.isSafeInteger(page) || page < 1 || page > 100_000) throw new Error('B站视频参数异常');
   const data = await envelope(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`, signal);
   const pages = Array.isArray(data.pages) ? data.pages.filter(record) : [];
-  const target = pages.find(item => item.page === page) ?? pages[0];
+  const target = pages.find(item => item.page === page) ?? (page === 1 ? pages[0] : undefined);
+  if (!target && page > 1) throw new Error(`B站没有第 ${page} P，未回退到其他分 P`);
   const aid = Number(data.aid), cid = Number(target?.cid ?? data.cid);
-  if (!Number.isFinite(aid) || !Number.isFinite(cid) || !cid) throw new Error('B站视频缺少 aid/cid');
+  if (!Number.isSafeInteger(aid) || aid <= 0 || !Number.isSafeInteger(cid) || cid <= 0) throw new Error('B站视频缺少有效 aid/cid');
   return { aid, cid, title: String(target?.part ?? data.title ?? '').slice(0, 1000) };
 }
 export async function biliTracks(bvid: string, aid: number, cid: number, signal?: AbortSignal): Promise<{ tracks: BiliTrack[]; needLogin: boolean }> {
@@ -70,10 +89,10 @@ export async function biliTracks(bvid: string, aid: number, cid: number, signal?
   const tracks: BiliTrack[] = raw.filter(record).flatMap((item, index) => {
     const url = subtitleUrl(item.subtitle_url);
     if (!url) return [];
-    const language = String(item.lan ?? ''), name = String(item.lan_doc ?? (language || `字幕 ${index + 1}`));
+    const language = String(item.lan ?? '').slice(0, 100), name = String(item.lan_doc ?? (language || `字幕 ${index + 1}`)).slice(0, 500);
     const automatic = Number(item.ai_status) > 0 || Number(item.ai_type) > 0 || language.startsWith('ai-');
     const kind: BiliTrack['kind'] = automatic ? 'asr' : 'manual';
-    return [{ id: `bili:${String(item.id ?? index)}`, name, language, kind, url }];
+    return [{ id: `bili:${String(item.id ?? index).slice(0, 450)}:${index}`, name, language, kind, url }];
   });
   const preferred = (items: BiliTrack[]) => [...items].sort((a, b) => Number(a.kind === 'asr') - Number(b.kind === 'asr'))[0];
   const english = preferred(tracks.filter(track => /^en(?:-|$)/i.test(track.language)));
@@ -87,7 +106,7 @@ export async function biliTracks(bvid: string, aid: number, cid: number, signal?
   const chinese = [...tracks.filter(track => /^(?:zh|ai-zh)(?:-|$)/i.test(track.language))]
     .sort((a, b) => chineseRank(a) - chineseRank(b) || Number(a.kind === 'asr') - Number(b.kind === 'asr'))[0];
   if (english && chinese && !tracks.some(track => /双语|中英|bilingual/i.test(track.name))) {
-    tracks.push({ id: `bili:dual:${english.id}:${chinese.id}`, name: `${english.name} + ${chinese.name}（网站双语）`,
+    tracks.push({ id: `bili:dual:${tracks.indexOf(english)}:${tracks.indexOf(chinese)}`, name: `${english.name} + ${chinese.name}（网站双语）`.slice(0, 500),
       language: `${english.language}+${chinese.language}`, kind: english.kind === 'manual' && chinese.kind === 'manual' ? 'manual' : 'asr',
       url: english.url, secondary: { id: chinese.id, name: chinese.name, language: chinese.language, url: chinese.url } });
   }
@@ -96,19 +115,21 @@ export async function biliTracks(bvid: string, aid: number, cid: number, signal?
 export function chooseBiliTrack(tracks: BiliTrack[]) {
   const preference = (track: BiliTrack) => {
     if (/双语|中英|bilingual/i.test(track.name)) return 0;
-    const rank = ['zh-CN','zh-Hans','zh-Hant','zh','ai-zh','en-US','en','ai-en'].indexOf(track.language);
+    const rank = ['zh-cn','zh-hans','zh-hant','zh','ai-zh','en-us','en','ai-en'].indexOf(track.language.toLowerCase());
     return (rank < 0 ? 20 : rank + 1) + (track.kind === 'asr' ? .5 : 0);
   };
   return [...tracks].sort((a, b) => preference(a) - preference(b))[0];
 }
 async function fetchBiliCues(url: string, trackId: string, signal?: AbortSignal): Promise<RawCue[]> {
-  const response = await fetch(url, { credentials: 'omit', signal, headers: { Accept: 'application/json' } });
+  const response = await fetch(url, { credentials: 'omit', signal, redirect: 'error', cache: 'no-store', headers: { Accept: 'application/json' } });
   if (!response.ok) throw new Error(`B站字幕下载失败：HTTP ${response.status}`);
-  const payload: unknown = await response.json();
+  const payload = await boundedJson(response);
   if (!record(payload) || !Array.isArray(payload.body) || payload.body.length > 40_000) throw new Error('B站字幕结构异常');
   const cues = payload.body.map((item, index): RawCue | null => {
     if (!record(item)) return null;
-    const start = Number(item.from), end = Number(item.to), text = String(item.content ?? '');
+    if (typeof item.content !== 'string') throw new Error(`B站字幕第 ${index + 1} 条正文结构异常`);
+    const start = Number(item.from), end = Number(item.to), text = item.content;
+    if (text.length > 100_000) throw new Error(`B站字幕第 ${index + 1} 条文本异常过长`);
     const valid = Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start;
     return { cueId: `${trackId}:${index}`, sourceIndex: index, text, startMs: valid ? Math.round(start * 1000) : null,
       endMs: valid ? Math.round(end * 1000) : null, timingSource: 'start+duration', timingIssue: valid ? null : '缺少或非法时间', raw: item };
@@ -122,11 +143,14 @@ export function pairBiliCues(primary: RawCue[], secondary: RawCue[], trackId = '
   const output: RawCue[] = []; let left = 0, right = 0;
   const emit = (a: RawCue[], b: RawCue[]) => {
     const timed = [...a, ...b].filter(validTime);
+    const primaryTimed = a.filter(validTime);
+    const startMs = a.length ? primaryTimed.length ? Math.min(...primaryTimed.map(cue => cue.startMs)) : null
+      : timed.length ? Math.min(...timed.map(cue => cue.startMs)) : null;
     output.push({ cueId: `${trackId}:${output.length}`, sourceIndex: output.length,
       text: [a.map(cue => cue.text).filter(Boolean).join(' '), b.map(cue => cue.text).filter(Boolean).join(' ')].filter(Boolean).join('\n'),
-      startMs: timed.length ? Math.min(...timed.map(cue => cue.startMs)) : null,
+      startMs,
       endMs: timed.length ? Math.max(...timed.map(cue => cue.endMs)) : null,
-      timingSource: 'start+duration', timingIssue: timed.length ? null : '缺少或非法时间',
+      timingSource: 'start+duration', timingIssue: startMs !== null && timed.length ? null : '主字幕缺少或非法时间',
       raw: { primary: a.map(cue => cue.raw), secondary: b.map(cue => cue.raw) } });
   };
   while (left < primary.length && right < secondary.length) {
@@ -157,9 +181,11 @@ export function pairBiliCues(primary: RawCue[], secondary: RawCue[], trackId = '
   return output;
 }
 export async function biliCues(track: BiliTrack, signal?: AbortSignal): Promise<RawCue[]> {
-  const primary = await fetchBiliCues(track.url, track.id, signal);
-  if (!track.secondary) return primary;
-  const secondary = await fetchBiliCues(track.secondary.url, track.secondary.id, signal);
+  if (!track.secondary) return fetchBiliCues(track.url, track.id, signal);
+  const [primary, secondary] = await Promise.all([
+    fetchBiliCues(track.url, track.id, signal),
+    fetchBiliCues(track.secondary.url, track.secondary.id, signal),
+  ]);
   return pairBiliCues(primary, secondary, track.id);
 }
 
@@ -209,21 +235,36 @@ function rollingDelta(previous: string, current: string) {
 
 type DisplayLane = { primary: string; secondary: string };
 
+function cueLanes(cue: RawCue): DisplayLane | null {
+  if (record(cue.raw) && Array.isArray(cue.raw.primary) && Array.isArray(cue.raw.secondary)) {
+    return { primary: laneText(cue.raw.primary), secondary: laneText(cue.raw.secondary) };
+  }
+  const lines = cue.text.split(/\r?\n/u).map(line => line.replace(/\s+/gu, ' ').trim()).filter(Boolean);
+  if (lines.length < 2) return null;
+  const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+  const latin = /\p{Script=Latin}/u;
+  const primary = lines.filter(line => latin.test(line) && !cjk.test(line)).join(' ');
+  const secondary = lines.filter(line => cjk.test(line)).join(' ');
+  return primary && secondary ? { primary, secondary } : null;
+}
+
 function bilingualDisplayCues(cues: RawCue[]) {
   const lanes = new Map<string, DisplayLane>();
   const display: RawCue[] = [];
-  let previousPrimary = '', previousSecondary = '', found = false;
+  let previousPrimary = '', previousSecondary = '', previousEndMs: number | null = null, found = false;
   for (const cue of cues) {
-    const paired = record(cue.raw) && Array.isArray(cue.raw.primary) && Array.isArray(cue.raw.secondary);
-    if (!paired) { display.push(cue); continue; }
+    const lanesForCue = cueLanes(cue);
+    if (!lanesForCue) { previousPrimary = ''; previousSecondary = ''; previousEndMs = null; display.push(cue); continue; }
     found = true;
-    const primary = laneText(cue.raw.primary), secondary = laneText(cue.raw.secondary);
+    const { primary, secondary } = lanesForCue;
+    if (previousEndMs !== null && cue.startMs !== null && (cue.startMs < previousEndMs - MAX_BILI_PHRASE_MS || cue.startMs - previousEndMs > 1_500)) {
+      previousPrimary = ''; previousSecondary = '';
+    }
     const delta = { primary: rollingDelta(previousPrimary, primary), secondary: rollingDelta(previousSecondary, secondary) };
-    if (primary) previousPrimary = primary;
-    if (secondary) previousSecondary = secondary;
+    previousPrimary = primary; previousSecondary = secondary; previousEndMs = cue.endMs;
     if (!delta.primary && !delta.secondary) {
       const last = display.at(-1);
-      if (last && last.endMs !== null && cue.endMs !== null) last.endMs = Math.max(last.endMs, cue.endMs);
+      if (last && last.endMs !== null && cue.endMs !== null) display[display.length - 1] = { ...last, endMs: Math.max(last.endMs, cue.endMs) };
       continue;
     }
     const derived = { ...cue, text: delta.primary || delta.secondary };

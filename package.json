@@ -1,6 +1,6 @@
 {
   "name": "youtube-language-helper",
-  "description": "YouTube raw caption learning helper — M0",
+  "description": "YouTube and Bilibili caption learning helper — M0",
   "private": true,
   "version": "0.0.1",
   "type": "module",

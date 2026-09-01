@@ -34,12 +34,47 @@ const imageKey = (url: string) => { const name = url.split('/').pop()?.split('?'
 const query = (params: Record<string, string | number>) => Object.keys(params).sort().map(key =>
   `${encodeURIComponent(key)}=${encodeURIComponent(String(params[key] ?? '').replace(/[!'()*]/g, ''))}`).join('&');
 
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function boundedNavJson(response: Response) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('B站 WBI 密钥没有响应体');
+  const decoder = new TextDecoder(); let text = '', size = 0;
+  while (true) {
+    const chunk = await reader.read(); if (chunk.done) break;
+    size += chunk.value.byteLength;
+    if (size > 1_000_000) { await reader.cancel(); throw new Error('B站 WBI 密钥响应过大'); }
+    text += decoder.decode(chunk.value, { stream: true });
+  }
+  text += decoder.decode();
+  try { return JSON.parse(text) as unknown; } catch { throw new Error('B站 WBI 密钥响应格式异常'); }
+}
+
+function wbiKey(value: unknown) {
+  if (typeof value !== 'string' || value.length > 4000) return '';
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || !(url.hostname === 'hdslb.com' || url.hostname.endsWith('.hdslb.com'))) return '';
+    const key = imageKey(url.pathname);
+    return /^[a-f0-9]{32}$/i.test(key) ? key : '';
+  } catch { return ''; }
+}
+
 export async function signedPlayerUrl(params: { aid: number; cid: number; bvid: string }, signal?: AbortSignal) {
-  const response = await fetch('https://api.bilibili.com/x/web-interface/nav', { credentials: 'include', signal, headers: { Accept: 'application/json' } });
+  if (!Number.isSafeInteger(params.aid) || params.aid <= 0 || !Number.isSafeInteger(params.cid) || params.cid <= 0
+    || !/^BV1[0-9A-Za-z]{9}$/.test(params.bvid)) throw new Error('B站 WBI 播放参数异常');
+  const response = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+    credentials: 'include', signal, redirect: 'error', cache: 'no-store', headers: { Accept: 'application/json' },
+  });
   if (!response.ok) throw new Error(`B站 WBI 密钥请求失败：HTTP ${response.status}`);
-  const payload = await response.json() as { data?: { wbi_img?: { img_url?: string; sub_url?: string } } };
-  const raw = imageKey(payload.data?.wbi_img?.img_url ?? '') + imageKey(payload.data?.wbi_img?.sub_url ?? '');
-  if (raw.length < 64) throw new Error('B站 WBI 密钥结构异常');
+  const payload = await boundedNavJson(response);
+  if (!record(payload) || payload.code !== 0 || !record(payload.data) || !record(payload.data.wbi_img)) {
+    throw new Error('B站 WBI 密钥接口返回异常');
+  }
+  const raw = wbiKey(payload.data.wbi_img.img_url) + wbiKey(payload.data.wbi_img.sub_url);
+  if (raw.length !== 64) throw new Error('B站 WBI 密钥结构异常');
   const mixin = mixinTable.map(index => raw[index]).join('').slice(0, 32);
   const signed: Record<string, string | number> = { ...params, wts: Math.floor(Date.now() / 1000) };
   const encoded = query(signed); signed.w_rid = md5(encoded + mixin);

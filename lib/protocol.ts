@@ -1,8 +1,12 @@
-import { record, type RawCue } from './captions';
-import type { TimedPhrase } from './timed-phrases';
+import { record, type RawCue } from './captions.ts';
+import type { TimedPhrase } from './timed-phrases.ts';
 
 export const CHANNEL = 'ylh-page-v1';
 export const PORT = 'ylh-panel-v1';
+export const PLAYBACK_RATES = [.5, .75, .8, .9, 1, 1.1, 1.25, 1.5, 2] as const;
+export function isPlaybackRate(value: unknown): value is (typeof PLAYBACK_RATES)[number] {
+  return typeof value === 'number' && (PLAYBACK_RATES as readonly number[]).includes(value);
+}
 export type Track = { id: string; fingerprint: string; name: string; language: string; kind: 'manual' | 'asr' };
 export type VideoInfo = { videoId: string; title: string; session: string; tracks: Track[]; availability: string; platform?: 'youtube' | 'bilibili' };
 export type State = {
@@ -23,7 +27,7 @@ export function isVideoInfo(v: unknown): v is VideoInfo {
     && typeof v.session === 'string' && v.session.length <= 100
     && typeof v.availability === 'string' && v.availability.length <= 300
     && Array.isArray(v.tracks) && v.tracks.length <= 200 && v.tracks.every(t => record(t)
-      && typeof t.id === 'string' && t.id.length <= 500 && typeof t.fingerprint === 'string' && t.fingerprint.length <= 2000
+      && typeof t.id === 'string' && !!t.id && t.id.length <= 500 && typeof t.fingerprint === 'string' && !!t.fingerprint && t.fingerprint.length <= 2000
       && typeof t.name === 'string' && t.name.length <= 500 && typeof t.language === 'string' && t.language.length <= 100
       && (t.kind === 'asr' || t.kind === 'manual'))
     && (v.platform === undefined || v.platform === 'youtube' || v.platform === 'bilibili');

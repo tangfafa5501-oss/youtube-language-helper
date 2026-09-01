@@ -9,6 +9,18 @@ export default defineContentScript({
     let inFlight: AbortController | null = null;
     let busy = false;
     const urls = new Map<string, string>();
+    async function boundedBody(response: Response, maxBytes: number, label: string) {
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error(`${label}没有响应体`);
+      const decoder = new TextDecoder(); let body = '', bytes = 0;
+      while (true) {
+        const chunk = await reader.read(); if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > maxBytes) { await reader.cancel(); throw new Error(`${label}响应过大`); }
+        body += decoder.decode(chunk.value, { stream: true });
+      }
+      return body + decoder.decode();
+    }
     function info(): VideoInfo | null {
       const id = watchVideoId(location.href);
       if (id !== currentId) {
@@ -50,7 +62,7 @@ export default defineContentScript({
     addEventListener('message', async event => {
       const m = event.data;
       if (event.source !== window || event.origin !== location.origin || !record(m) || m.channel !== CHANNEL || m.direction !== 'request'
-        || m.version !== 1 || typeof m.requestId !== 'string' || m.requestId.length > 100) return;
+        || m.version !== 1 || typeof m.requestId !== 'string' || !/^[\w-]{1,100}$/.test(m.requestId)) return;
       const reply = (payload: object) => window.postMessage({ channel: CHANNEL, direction: 'response', version: 1, requestId: m.requestId, ...payload }, location.origin);
       if (m.type === 'info') { reply({ video: info() }); return; }
       if (m.type === 'word-timing') {
@@ -70,12 +82,14 @@ export default defineContentScript({
             deviceModel: 'RealityDevice17,1', osName: 'visionOS', osVersion: '26.5.23O471', hl: 'en',
             timeZone: 'UTC', utcOffsetMinutes: 0, visitorData } };
           const playerResponse = await fetch('/youtubei/v1/player?prettyPrint=false', { method: 'POST', credentials: 'include',
-            signal: controller.signal, headers: { 'Content-Type': 'application/json', 'X-YouTube-Client-Name': '101',
+            signal: controller.signal, redirect: 'error', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-YouTube-Client-Name': '101',
               'X-YouTube-Client-Version': '1.02', 'X-Goog-Visitor-Id': visitorData },
             body: JSON.stringify({ videoId: v.videoId, context,
               playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } } }) });
           if (!playerResponse.ok) throw new Error(`YouTube 播放器接口失败：HTTP ${playerResponse.status}`);
-          const player: unknown = await playerResponse.json();
+          let player: unknown;
+          try { player = JSON.parse(await boundedBody(playerResponse, 4_000_000, 'YouTube 播放器')); }
+          catch (error) { throw error instanceof SyntaxError ? new Error('YouTube 播放器响应格式异常') : error; }
           if (!record(player) || !record(player.videoDetails) || player.videoDetails.videoId !== v.videoId) throw new Error('YouTube 播放器响应与视频不匹配');
           const captions = record(player.captions) ? player.captions : {};
           const renderer = record(captions.playerCaptionsTracklistRenderer) ? captions.playerCaptionsTracklistRenderer : {};
@@ -88,15 +102,7 @@ export default defineContentScript({
           if (!target) throw new Error('词级字幕地址未通过来源校验');
           const response = await fetch(target, { credentials: 'include', signal: controller.signal, redirect: 'error' });
           if (!response.ok) throw new Error(`词级字幕请求失败：HTTP ${response.status}`);
-          const reader = response.body?.getReader(); if (!reader) throw new Error('词级字幕没有响应体');
-          const decoder = new TextDecoder(); let body = '', bytes = 0;
-          while (true) {
-            const chunk = await reader.read(); if (chunk.done) break;
-            bytes += chunk.value.byteLength;
-            if (bytes > 8_000_000) { await reader.cancel(); throw new Error('词级字幕响应过大'); }
-            body += decoder.decode(chunk.value, { stream: true });
-          }
-          body += decoder.decode();
+          const body = await boundedBody(response, 8_000_000, '词级字幕');
           if (!body.trim()) throw new Error('词级字幕返回空内容');
           if (info()?.session !== v.session) throw new Error('视频已切换，旧词级时间已丢弃');
           reply({ body, videoId: v.videoId, session: v.session });
@@ -116,17 +122,7 @@ export default defineContentScript({
       try {
         const response = await fetch(target, { credentials: 'include', signal: controller.signal, redirect: 'error' });
         if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? '字幕访问被拒绝，请在 YouTube 检查访问权限' : `字幕请求失败：HTTP ${response.status}`);
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('字幕接口没有响应体');
-        const decoder = new TextDecoder(); let body = ''; let bytes = 0;
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          bytes += chunk.value.byteLength;
-          if (bytes > 8_000_000) { await reader.cancel(); throw new Error('字幕响应过大，M0 不截断显示'); }
-          body += decoder.decode(chunk.value, { stream: true });
-        }
-        body += decoder.decode();
+        const body = await boundedBody(response, 8_000_000, '字幕');
         if (info()?.session !== v.session) throw new Error('视频已切换，旧响应已丢弃');
         reply({ body, videoId: v.videoId, session: v.session, trackId: m.trackId });
       } catch (error) {

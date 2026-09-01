@@ -3,29 +3,35 @@ import sbd from 'sbd';
 // Display-only phrasing. These offsets are text boundaries, never timestamps.
 // Keep short comma asides with their context; do not treat every comma as a cut.
 const wordCount = (text: string) => text.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
+const MAX_DISPLAY_TEXT = 200_000;
 
 function phraseSentence(sentence: string): string[] {
   const cuts = new Set<number>();
   const commas: number[] = [];
-  let depth = 0, opening = -1, quote = '';
+  const brackets: Array<{ close: string; opening: number }> = [];
+  let quote = '';
   for (let i = 0; i < sentence.length; i++) {
     const char = sentence[i]!;
     if (quote) {
       if (char === quote) quote = '';
       continue;
     }
-    if (char === '"' || char === '“') { quote = char === '“' ? '”' : '"'; continue; }
-    if (char === '(') { if (depth++ === 0) opening = i; continue; }
-    if (char === ')' && depth > 0) {
-      if (--depth === 0) {
+    if (char === '"' || char === '“' || char === '‘' || char === '«') {
+      quote = char === '“' ? '”' : char === '‘' ? '’' : char === '«' ? '»' : '"'; continue;
+    }
+    const closing = char === '(' ? ')' : char === '[' ? ']' : char === '{' ? '}' : '';
+    if (closing) { brackets.push({ close: closing, opening: i }); continue; }
+    if (brackets.length && char === brackets.at(-1)!.close) {
+      const completed = brackets.pop()!;
+      if (!brackets.length) {
         // Attach punctuation following an aside to the aside, not the next line.
         let end = i + 1;
         while (/[,.!?;:]/.test(sentence[end] ?? '') && end < sentence.length) end++;
-        cuts.add(opening); cuts.add(end);
+        cuts.add(completed.opening); cuts.add(end);
       }
       continue;
     }
-    if (depth) continue;
+    if (brackets.length) continue;
     // An em dash, or a non-numeric en dash, marks a pause. Hyphenated words
     // and ranges such as 10–20 remain intact. Keep the original dash character.
     if (char === '—' || char === '–' && !(/\d/.test(sentence[i - 1] ?? '') && /\d/.test(sentence[i + 1] ?? ''))) {
@@ -33,6 +39,7 @@ function phraseSentence(sentence: string): string[] {
     }
     if (char === ',' && /\s/.test(sentence[i + 1] ?? '')) commas.push(i);
     if (char === ';' && /\s/.test(sentence[i + 1] ?? '')) cuts.add(i + 1);
+    if (char === ':' && /\s/.test(sentence[i + 1] ?? '') && wordCount(sentence.slice(0, i)) >= 2) cuts.add(i + 1);
   }
   const structuralCuts = [...cuts].sort((a, b) => a - b);
   let start = 0, structuralIndex = 0;
@@ -69,6 +76,19 @@ function phraseSentence(sentence: string): string[] {
         && wordCount(sentence.slice(boundary, partEnd)) >= 4) cuts.add(boundary);
     }
   }
+  // Long clauses without punctuation still need a usable reading breath. Use
+  // explicit conjunction/relative-clause words only when both sides are long.
+  const conjunctionCuts = [0, ...cuts, sentence.length].sort((a, b) => a - b);
+  for (let part = 0; part + 1 < conjunctionCuts.length; part++) {
+    const partStart = conjunctionCuts[part]!, partEnd = conjunctionCuts[part + 1]!;
+    const segment = sentence.slice(partStart, partEnd);
+    for (const match of segment.matchAll(/\s+(?=(?:and|but|because|while|when|which|who|that|so)\s+)/giu)) {
+      const boundary = partStart + match.index! + match[0].length;
+      if (wordCount(sentence.slice(partStart, boundary)) >= 12 && wordCount(sentence.slice(boundary, partEnd)) >= 5) {
+        cuts.add(boundary); break;
+      }
+    }
+  }
   cuts.add(sentence.length);
   const lines: string[] = [];
   let offset = 0;
@@ -85,6 +105,7 @@ export function readingLines(text: string): string[] {
   // display copy; raw captions and the original-event view remain untouched.
   const display = text.replace(/\s+/gu, ' ').trim();
   if (!display) return [];
+  if (display.length > MAX_DISPLAY_TEXT) return [display];
   // SBD's default rules target English. Preserve mixed/CJK source text without
   // claiming English phrase heuristics work for bilingual captions.
   if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(display)) {

@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { biliPhrases, biliVideo, bvidToAid, chooseBiliTrack, isBiliTrack, pairBiliCues } from '../lib/bilibili.ts';
-import { md5 } from '../lib/bilibili-wbi.ts';
+import { biliCues, biliMetadata, biliPhrases, biliVideo, bvidToAid, chooseBiliTrack, isBiliTrack, pairBiliCues } from '../lib/bilibili.ts';
+import { md5, signedPlayerUrl } from '../lib/bilibili-wbi.ts';
 import type { RawCue } from '../lib/captions.ts';
 
 test('Bilibili URL/page parsing and WBI MD5 match known platform inputs', () => {
   assert.deepEqual(biliVideo('https://www.bilibili.com/video/BV1GJ411x7h7?p=2'), { bvid: 'BV1GJ411x7h7', page: 2 });
   assert.equal(biliVideo('https://www.youtube.com/watch?v=abcdefghijk'), null);
+  assert.deepEqual(biliVideo('https://www.bilibili.com/video/BV1GJ411x7h7?p=1.5'), { bvid: 'BV1GJ411x7h7', page: 1 });
+  assert.deepEqual(biliVideo('https://www.bilibili.com/video/BV1GJ411x7h7?p=999999999'), { bvid: 'BV1GJ411x7h7', page: 1 });
   for (const sample of ['', 'abc', '中文字幕测试', 'a'.repeat(64)]) {
     assert.equal(md5(sample), createHash('md5').update(sample).digest('hex'));
   }
@@ -25,7 +27,87 @@ test('Bilibili page-bridge tracks only accept official HTTPS subtitle hosts', ()
   assert.equal(isBiliTrack(valid), true);
   assert.equal(isBiliTrack({ ...valid, url: 'http://i0.hdslb.com/subtitle.json' }), false);
   assert.equal(isBiliTrack({ ...valid, url: 'https://example.com/subtitle.json' }), false);
+  assert.equal(isBiliTrack({ ...valid, id: '' }), false);
   assert.equal(isBiliTrack({ ...valid, secondary: { id: 'x', name: '中文', language: 'zh-CN', url: 'https://evil.example/subtitle.json' } }), false);
+  assert.equal(isBiliTrack({ ...valid, secondary: { id: valid.id, name: '中文', language: 'zh-CN', url: 'https://i0.hdslb.com/zh.json' } }), false);
+  assert.equal(isBiliTrack({ ...valid, secondary: { id: 'zh', name: '中文', language: 'zh-CN', url: valid.url } }), false);
+});
+
+test('Bilibili WBI signing rejects invalid inputs and untrusted key images before player requests', async t => {
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async (_input, options) => {
+    calls++; assert.equal(options?.redirect, 'error'); assert.equal(options?.cache, 'no-store');
+    return Response.json({ code: 0, data: { wbi_img: {
+      img_url: 'https://evil.example/7cd084941338484aae1ad9425b84077c.png',
+      sub_url: 'https://i0.hdslb.com/4932caff0ff746eab6f01bf08b70ac45.png',
+    } } });
+  };
+  t.after(() => { globalThis.fetch = original; });
+  await assert.rejects(signedPlayerUrl({ aid: 0, cid: 2, bvid: 'BV1GJ411x7h7' }), /播放参数异常/);
+  assert.equal(calls, 0);
+  await assert.rejects(signedPlayerUrl({ aid: 1, cid: 2, bvid: 'BV1GJ411x7h7' }), /密钥结构异常/);
+  assert.equal(calls, 1);
+});
+
+test('Bilibili WBI nav response is bounded and must report a successful envelope', async t => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = async () => Response.json({ code: -101, message: 'not logged in' });
+  await assert.rejects(signedPlayerUrl({ aid: 1, cid: 2, bvid: 'BV1GJ411x7h7' }), /接口返回异常/);
+  globalThis.fetch = async () => new Response('x'.repeat(1_000_001));
+  await assert.rejects(signedPlayerUrl({ aid: 1, cid: 2, bvid: 'BV1GJ411x7h7' }), /响应过大/);
+});
+
+test('Bilibili metadata never substitutes part one for a missing requested part', async t => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ code: 0, data: { aid: 1, cid: 2, title: 'Video',
+    pages: [{ page: 1, cid: 2, part: 'Part one' }] } });
+  t.after(() => { globalThis.fetch = original; });
+  await assert.rejects(biliMetadata('BV1GJ411x7h7', 2), /没有第 2 P/);
+});
+
+test('Bilibili metadata rejects unsafe aid/cid values and invalid parameters', async t => {
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ code: 0, data: { aid: -1, cid: 1.5, title: 'Bad' } }); };
+  t.after(() => { globalThis.fetch = original; });
+  await assert.rejects(biliMetadata('invalid', 1), /参数异常/); assert.equal(calls, 0);
+  await assert.rejects(biliMetadata('BV1GJ411x7h7', 1), /有效 aid\/cid/); assert.equal(calls, 1);
+});
+
+test('Bilibili subtitle downloads reject one pathological cue instead of exhausting the panel', async t => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ body: [{ from: 0, to: 1, content: 'x'.repeat(100_001) }] });
+  t.after(() => { globalThis.fetch = original; });
+  await assert.rejects(biliCues({ id: 'bili:test', name: 'Test', language: 'en', kind: 'manual',
+    url: 'https://i0.hdslb.com/test.json' }), /文本异常过长/);
+});
+
+test('Bilibili subtitle downloads reject non-string website body content', async t => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ body: [{ from: 0, to: 1, content: { text: 'not supported' } }] });
+  t.after(() => { globalThis.fetch = original; });
+  await assert.rejects(biliCues({ id: 'bili:test', name: 'Test', language: 'en', kind: 'manual',
+    url: 'https://i0.hdslb.com/test.json' }), /正文结构异常/);
+});
+
+test('Bilibili website bilingual lanes download concurrently', async t => {
+  const original = globalThis.fetch;
+  const releases = new Map<string, (response: Response) => void>();
+  const calls: string[] = [];
+  globalThis.fetch = async input => await new Promise<Response>(resolve => {
+    const url = String(input); calls.push(url); releases.set(url, resolve);
+  });
+  t.after(() => { globalThis.fetch = original; });
+  const pending = biliCues({ id: 'dual', name: '双语', language: 'en+zh', kind: 'manual', url: 'https://i0.hdslb.com/en.json',
+    secondary: { id: 'zh', name: '中文', language: 'zh', url: 'https://i0.hdslb.com/zh.json' } });
+  await new Promise(resolve => setImmediate(resolve));
+  const callsBeforeAnyResponse = calls.length;
+  for (const [url, release] of releases) release(Response.json({ body: [{ from: 0, to: 1, content: url.includes('en.json') ? 'Hello.' : '你好。' }] }));
+  await new Promise(resolve => setImmediate(resolve));
+  for (const [url, release] of releases) release(Response.json({ body: [{ from: 0, to: 1, content: url.includes('en.json') ? 'Hello.' : '你好。' }] }));
+  const cues = await pending;
+  assert.equal(callsBeforeAnyResponse, 2);
+  assert.equal(cues[0].text, 'Hello.\n你好。');
 });
 
 test('Bilibili chooses a website bilingual track first, then manual language tracks', () => {
@@ -65,6 +147,44 @@ test('Bilibili website bilingual pairing aligns existing tracks without translat
   assert.equal(phrases.length, 1);
   assert.equal(phrases[0].text, 'Hello. How are you?\n你好。你好吗？');
   assert.deepEqual([phrases[0].startMs, phrases[0].endMs], [1000, 5000]);
+});
+
+test('Bilibili bilingual click time follows the primary learning language when translations start earlier', () => {
+  const cue = (cueId: string, text: string, startMs: number, endMs: number) => ({ cueId, sourceIndex: 0, text, startMs, endMs,
+    timingSource: 'start+duration' as const, timingIssue: null, raw: { text } });
+  const paired = pairBiliCues([cue('en:0', 'Start now.', 1_000, 3_000)], [cue('zh:0', '现在开始。', 500, 3_200)]);
+  assert.deepEqual([paired[0].startMs, paired[0].endMs], [1_000, 3_200]);
+});
+
+test('Bilibili bilingual pairing never borrows a translation timestamp for untimed primary text', () => {
+  const primary: RawCue = { cueId: 'en:bad', sourceIndex: 0, text: 'Untimed English.', startMs: null, endMs: null,
+    timingSource: 'start+duration', timingIssue: 'bad', raw: {} };
+  const secondary: RawCue = { cueId: 'zh:0', sourceIndex: 0, text: '有时间的翻译。', startMs: 1_000, endMs: 2_000,
+    timingSource: 'start+duration', timingIssue: null, raw: {} };
+  const [paired] = pairBiliCues([primary], [secondary]);
+  assert.equal(paired.startMs, null); assert.match(paired.timingIssue ?? '', /主字幕/);
+  assert.equal(biliPhrases([paired]).length, 0);
+});
+
+test('Bilibili rolling-caption cleanup is pure and resets after a real silent gap', () => {
+  const paired: RawCue[] = [
+    { cueId: 'dual:0', sourceIndex: 0, text: 'Repeat this.\n重复。', startMs: 0, endMs: 1_000,
+      timingSource: 'start+duration', timingIssue: null, raw: { primary: [{ content: 'Repeat this.' }], secondary: [{ content: '重复。' }] } },
+    { cueId: 'dual:1', sourceIndex: 1, text: 'Repeat this.\n重复。', startMs: 5_000, endMs: 6_000,
+      timingSource: 'start+duration', timingIssue: null, raw: { primary: [{ content: 'Repeat this.' }], secondary: [{ content: '重复。' }] } },
+  ];
+  const before = structuredClone(paired);
+  const phrases = biliPhrases(paired);
+  assert.deepEqual(paired, before);
+  assert.equal(phrases.map(item => item.text).join('\n').match(/Repeat this\./g)?.length, 2);
+});
+
+test('a website-provided bilingual cue is normalized to English above Chinese even when its source lines are reversed', () => {
+  const cues: RawCue[] = [{ cueId: 'site:0', sourceIndex: 0, text: '同学们好。\nHello students.', startMs: 1_000, endMs: 3_000,
+    timingSource: 'start+duration', timingIssue: null, raw: { content: '同学们好。\nHello students.' } }];
+  const phrases = biliPhrases(cues);
+  assert.equal(phrases[0].text, 'Hello students.\n同学们好。');
+  assert.deepEqual(cues[0].text, '同学们好。\nHello students.');
 });
 
 test('Bilibili bilingual pairing preserves front, middle and post-20-minute real cue boundaries', () => {

@@ -28,6 +28,12 @@ test('<=2s joins forward repeatedly; >2s and the final short sentence are retain
   assert.deepEqual(groups.map(g => [g.startMs, g.endMs]), [[0, 2500], [3000, 5001], [6000, 11000], [11000, 11200]]);
 });
 
+test('a short caption remains separate when the next sentence starts after a long silence', () => {
+  const groups = groupSentences(fixture([['Go!', 0, 1_000], ['Continue now.', 5_000, 3_000]]));
+  assert.deepEqual(groups.map(group => group.text), ['Go!', 'Continue now.']);
+  assert.deepEqual(groups.map(group => [group.startMs, group.endMs]), [[0, 1_000], [5_000, 8_000]]);
+});
+
 test('boundaries inside a source cue never manufacture a new timestamp', () => {
   const cues = fixture([['First sentence! Second', 1200125, 3000], ['sentence ends here.', 1203125, 3000]]);
   const groups = groupSentences(cues);
@@ -105,4 +111,11 @@ test('large overlapping short-cue input preserves every member without recursive
   assert.equal(groups.length, 1); assert.equal(groups[0].cues.length, 5000);
   assert.equal(groups[0].startMs, 1200125); assert.equal(groups[0].endMs, 1200625);
   assert.deepEqual(groups[0].cues, cues);
+});
+
+test('an abnormally large continuous run bypasses SBD while preserving every raw cue', () => {
+  const cues = fixture(Array.from({ length: 3 }, (_, index) => [`${'word '.repeat(34_000)}part${index}`, index * 10_000, 10_000]));
+  const groups = groupSentences(cues);
+  assert.equal(groups.length, cues.length); assert.deepEqual(groups.map(group => group.text), cues.map(item => item.text));
+  assert.ok(groups.every(group => /文本过长/.test(group.notice ?? '')));
 });

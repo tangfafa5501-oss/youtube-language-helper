@@ -1,5 +1,13 @@
 # M0 验证记录
 
+## 2026-09-01 本轮 100 项改进收口
+
+本轮在既有真实 YouTube/B站证据之上完成 `docs/improvement-ledger.md` 的 100/100 项有效改进。最终自动化结果为 **91/91 单元测试、54/54 生产 bundle 集成测试、TypeScript 类型检查、生产构建和 `git diff --check` 全部通过**。集成测试覆盖 YouTube 与 B站点击/播放协议、单句/循环/连续边界、同 BV 分 P、SPA、切轨、两个标签页、断开连接、Supadata 服务边界和设置持久化。
+
+本轮 Chrome 侧栏验收加载实际 `.output/chrome-mv3` 的生产 JS/CSS，并以模拟 Chrome Port、字幕和账户数据驱动。420×900 视口无横向溢出；英语自然语段在 `100 everyday words` 后进入下一个时间条；网站双语按英语/中文两行展示；语言、显示、播放模式、倍速、条目点击、上一/下一句、快捷键说明、API 设置和录音不支持提示均可操作；控制台无 error/warn。截图：`docs/evidence/sidepanel-production-preview-simulated.png`、`docs/evidence/options-production-preview-simulated.png`。
+
+上述浏览器结果属于“真实生产包 + 模拟 Port/数据”，不是已安装新版扩展或真实 Supadata 调用。下节记录的真实 YouTube/B站网页验收来自此前已安装生产版本；它仍证明真实链路可用，但不能自动覆盖本轮所有新增修改。以后必须继续分别标注真实网页、生产包模拟和单元测试。
+
 ## 2026-09-01 最新真实验收：YouTube 与 B站主流程通过
 
 本节覆盖下方保留的早期失败记录。运行环境为官方 Chrome Profile 2、已登录 B站、当前 `.output/chrome-mv3` 生产包；通过 `chrome://restart` 让磁盘构建真实重载，再从扩展工具栏打开原生 Side Panel。截图均为操作系统直接截取，不是模拟页面或合成图。

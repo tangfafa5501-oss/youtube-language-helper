@@ -42,12 +42,22 @@ async function harness(t) {
     chrome: { runtime: { id: 'test-extension', onConnect: connect, getURL: path => `chrome-extension://test-extension${path}` } },
     fetch: async url => {
       fetched = url;
+      if (String(url).includes('/youtubei/v1/player')) return Response.json({
+        videoDetails: { videoId }, captions: { playerCaptionsTracklistRenderer: { captionTracks: [
+          { baseUrl: `/api/timedtext?v=${videoId}&lang=en&kind=asr&word=1`, languageCode: 'en', kind: 'asr' },
+          { baseUrl: `/api/timedtext?v=${videoId}&lang=es&kind=asr&word=1`, languageCode: 'es', kind: 'asr' },
+        ] } },
+      });
+      if (String(url).includes('word=1')) return new Response(JSON.stringify({ events: [
+        { tStartMs: 1_000, dDurationMs: 2_000, segs: [{ utf8: 'Hola', tOffsetMs: 0 }, { utf8: ' mundo', tOffsetMs: 1_000 }] },
+      ] }));
       const body = responseBody;
       if (pauseResponse) await new Promise(resolve => { releaseResponse = resolve; });
       return new Response(body);
     },
   });
   runInContext(`var window = globalThis; var bus = new EventTarget();
+    window.ytcfg = { get: key => key === 'VISITOR_DATA' ? 'synthetic-visitor-data-at-least-twenty-characters' : undefined };
     window.addEventListener = bus.addEventListener.bind(bus);
     window.removeEventListener = bus.removeEventListener.bind(bus);
     var heldInfo = []; var holdInfo = false;
@@ -79,7 +89,8 @@ async function harness(t) {
     setAd: value => { adShowing = value; },
     holdInfo: () => { context.holdInfo = true; },
     releaseInfo: () => { runInContext('holdInfo = false; for (const response of heldInfo.splice(0)) window.postMessage(response);', context); },
-    send: m => onMessage.emit(m),
+    heldInfoCount: () => runInContext('heldInfo.length', context),
+    send: m => onMessage.emit({ trackId: state().trackId, ...m }),
     updateTracks: async ready => { tracksReady = ready; doc.dispatchEvent(new Event('yt-navigate-finish')); await tick(); },
     setBody: body => { responseBody = body; }, pause: () => { pauseResponse = true; },
     release: () => { releaseResponse?.(); },
@@ -105,11 +116,43 @@ test('production bridges preserve raw entries and seek a late cue on the bound v
 test('playback state follows the bound player and controls update the real video element', async t => {
   const h = await harness(t);
   h.video.currentTime = 12.24;
-  h.send({ version: 1, type: 'playback-rate', rate: .8, videoId: h.state().video.videoId, session: h.state().video.session });
+  h.send({ version: 1, type: 'playback-rate', rate: 1.25, videoId: h.state().video.videoId, session: h.state().video.session });
   h.send({ version: 1, type: 'playback-toggle', videoId: h.state().video.videoId, session: h.state().video.session });
   await new Promise(resolve => setTimeout(resolve, 300));
   const playback = h.messages.filter(message => message.type === 'playback-state').at(-1);
-  assert.deepEqual(playback, { type: 'playback-state', currentTimeMs: 12240, playing: true, rate: .8 });
+  assert.deepEqual(playback, { type: 'playback-state', videoId: h.state().video.videoId, session: h.state().video.session,
+    trackId: h.state().trackId, currentTimeMs: 12240, playing: true, rate: 1.25 });
+});
+
+test('YouTube playback controls reject a stale subtitle track binding', async t => {
+  const h = await harness(t); h.video.playbackRate = 1; h.video.paused = true;
+  h.send({ version: 1, type: 'playback-rate', rate: 1.5, trackId: 'stale-track',
+    videoId: h.state().video.videoId, session: h.state().video.session });
+  h.send({ version: 1, type: 'playback-toggle', trackId: 'stale-track',
+    videoId: h.state().video.videoId, session: h.state().video.session });
+  await tick(); assert.equal(h.video.playbackRate, 1); assert.equal(h.video.paused, true);
+});
+
+test('YouTube does not publish invalid media clock values to the side panel', async t => {
+  const h = await harness(t); await new Promise(resolve => setTimeout(resolve, 280));
+  h.video.currentTime = Number.NaN;
+  const count = h.messages.filter(message => message.type === 'playback-state').length;
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').length, count);
+});
+
+test('word timing follows the actual Supadata response language rather than the requested fallback label', async t => {
+  const h = await harness(t);
+  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'actual-language' };
+  h.send({ ...binding, type: 'supadata-begin' });
+  h.send({ ...binding, type: 'supadata-finish', requestedLanguage: 'en', data: {
+    lang: 'es', content: [{ offset: 1_000, duration: 2_000, text: 'Hola mundo.' }],
+  } });
+  h.send({ ...binding, type: 'timing-load', language: 'en' });
+  for (let i = 0; i < 50 && !h.state().phrases?.length; i++) await tick();
+  assert.equal(new URL(h.fetched).searchParams.get('lang'), 'es');
+  assert.equal(h.state().phrases[0].text, 'Hola mundo.');
+  assert.equal(h.state().phrases[0].startMs, 1_000);
 });
 test('single, loop, and all playback modes enforce Enjoy-compatible segment boundaries', async t => {
   const h = await harness(t); providerCues(h, [1_000, 2_000, 3_000]);
@@ -134,6 +177,59 @@ test('single, loop, and all playback modes enforce Enjoy-compatible segment boun
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, false);
   assert.ok(h.video.currentTime > all.endMs / 1000);
+});
+
+test('switching YouTube subtitle track cancels the previous loop boundary', async t => {
+  const h = await harness(t); providerCues(h, [1_000, 2_000]);
+  const phrase = h.state().cues[0];
+  h.seek(phrase, 'loop'); await tick();
+  h.select(h.state().video.tracks[1].id); await tick();
+  h.video.currentTime = phrase.endMs / 1000 + .05;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(h.video.paused, false);
+  assert.ok(h.video.currentTime > phrase.endMs / 1000);
+});
+
+test('a rejected YouTube play clears its pending segment boundary and reports without an unhandled rejection', async t => {
+  const h = await harness(t); providerCues(h, [1_000]);
+  h.video.play = async () => { throw new Error('synthetic autoplay rejection'); };
+  h.seek(h.state().cues[0], 'loop'); await tick();
+  assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /未完成/);
+  h.video.paused = false;
+  h.video.currentTime = h.state().cues[0].endMs / 1000 + .05;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.ok(h.video.currentTime > h.state().cues[0].endMs / 1000);
+});
+
+test('YouTube clamps a segment end to media duration before enforcing single playback', async t => {
+  const h = await harness(t); providerCues(h, [1_000]);
+  h.video.duration = 1.2;
+  h.seek(h.state().cues[0], 'single'); await tick();
+  h.video.currentTime = 1.21;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(h.video.paused, true);
+  assert.equal(h.video.currentTime, 1);
+});
+
+test('switching from a loop pause to continuous mode resumes immediately instead of remaining stuck', async t => {
+  const h = await harness(t); providerCues(h, [1_000]); const cue = h.state().cues[0];
+  h.seek(cue, 'loop'); await tick(); h.video.currentTime = cue.endMs / 1000 + .01;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(h.video.paused, true);
+  h.send({ version: 1, type: 'playback-mode', mode: 'all', videoId: h.state().video.videoId, session: h.state().video.session });
+  await tick(); assert.equal(h.video.paused, false);
+});
+
+test('a rejected YouTube loop resume stops cleanly without an unhandled promise rejection', async t => {
+  const h = await harness(t); providerCues(h, [1_000]); const cue = h.state().cues[0];
+  let calls = 0;
+  h.video.play = async () => { calls++; if (calls > 1) throw new Error('synthetic loop resume rejection'); h.video.paused = false; };
+  h.seek(cue, 'loop'); await tick(); h.video.currentTime = cue.endMs / 1000 + .01;
+  await new Promise(resolve => setTimeout(resolve, 680));
+  assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /已停止循环/);
+  h.video.paused = false; h.video.currentTime = cue.endMs / 1000 + .1;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.ok(h.video.currentTime > cue.endMs / 1000);
 });
 test('HTTP success with zero-byte content produces an explicit error', async t => {
   const h = await harness(t); h.setBody(''); h.load(); await tick();
@@ -204,6 +300,13 @@ test('SPA navigation during pending seek drops the old operation, including A-B-
   assert.notEqual(h.state().video.session, binding.session);
   h.send({ ...binding, type: 'supadata-finish', data: { lang: 'en', content: [{ offset: 0, duration: 100, text: 'stale' }] } });
   assert.equal(h.state().cues.length, 0);
+});
+
+test('YouTube navigation cancels a hung page handshake and starts the new video handshake immediately', async t => {
+  const h = await harness(t); h.holdInfo();
+  h.send({ version: 1, type: 'refresh' }); await tick(); assert.equal(h.heldInfoCount(), 1);
+  await h.navigate('lmnopqrstuv'); assert.equal(h.heldInfoCount(), 2);
+  h.releaseInfo(); await tick(); assert.equal(h.state().video.videoId, 'lmnopqrstuv');
 });
 
 test('two simulated tabs on the same video reject each other\'s seek and provider results', async t => {

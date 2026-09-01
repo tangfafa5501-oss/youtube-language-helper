@@ -37,3 +37,55 @@ test('a long sentence tail receives its own word-level timestamp', () => {
     { phrase: 'in my Modern Received Pronunciation accent.', startMs: 6000, endMs: 9000 },
   ]);
 });
+
+test('unrelated same-length transcripts are rejected instead of receiving invented word times', () => {
+  assert.throws(() => buildTimedPhrases([cue('Alpha beta. Gamma delta.')], [
+    word('orange', 0, 500), word('purple', 500, 1_000), word('silver', 1_000, 1_500), word('yellow', 1_500, 2_000),
+  ]), /未能对齐/);
+});
+
+test('a phrase must match both its first and last spoken word before it gets an independent timestamp', () => {
+  assert.throws(() => buildTimedPhrases([cue('Missing start words here.')], [
+    word('start', 500, 1_000), word('words', 1_000, 1_500), word('here', 1_500, 2_000),
+  ]), /未能对齐/);
+  assert.throws(() => buildTimedPhrases([cue('Words end missing.')], [
+    word('words', 0, 500), word('end', 500, 1_000), word('different', 1_000, 1_500),
+  ]), /未能对齐/);
+});
+
+test('matching only the first and last word is insufficient for a mostly unrelated phrase', () => {
+  const cues = [cue('Hello alpha beta gamma world.')];
+  const timings = ['Hello', 'xray', 'yankee', 'zulu', 'world'].map((text, index) => word(text, index * 600, index * 600 + 500));
+  assert.throws(() => buildTimedPhrases(cues, timings), /未能对齐/);
+});
+
+test('very long unequal tokens are rejected without expensive fuzzy comparison', () => {
+  const left = `start ${'a'.repeat(200)} alpha beta end.`;
+  const right = ['start', 'b'.repeat(200), 'xray', 'yankee', 'end'];
+  const timings = right.map((text, index) => word(text, index * 800, index * 800 + 700));
+  assert.throws(() => buildTimedPhrases([cue(left)], timings), /未能对齐/);
+});
+
+test('word timing order is validated instead of silently reordered', () => {
+  assert.throws(() => buildTimedPhrases([cue('One two.')], [word('one', 1_000, 1_500), word('two', 500, 900)]), /顺序异常/);
+  assert.throws(() => buildTimedPhrases([cue('One two.')], [word('one', 0, 0), word('two', 1, 2)]), /顺序异常/);
+});
+
+test('pathological alignment size is rejected before allocating an unbounded edit matrix', () => {
+  const timings = Array.from({ length: 12_001 }, (_, index) => word('word', index * 2, index * 2 + 1));
+  assert.throws(() => buildTimedPhrases([cue('Word.')], timings), /规模过大/);
+});
+
+test('phrase ends keep the last spoken word boundary instead of stretching across silence', () => {
+  const phrases = buildTimedPhrases([cue('First phrase. Second phrase.')], [
+    word('first', 0, 400), word('phrase', 400, 1_000), word('second', 5_000, 5_400), word('phrase', 5_400, 6_000),
+  ]);
+  assert.deepEqual(phrases.map(item => [item.startMs, item.endMs]), [[0, 1_000], [5_000, 6_000]]);
+});
+
+test('a short phrase does not merge across a long silent gap', () => {
+  const phrases = buildTimedPhrases([cue('Go! Continue now.')], [
+    word('go', 0, 800), word('continue', 5_000, 6_000), word('now', 6_000, 7_000),
+  ]);
+  assert.deepEqual(phrases.map(item => item.text), ['Go!', 'Continue now.']);
+});

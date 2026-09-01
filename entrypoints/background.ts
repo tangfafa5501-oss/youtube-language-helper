@@ -5,12 +5,13 @@ import { SUPADATA_ORIGIN, SupadataError, fetchSupadata, testSupadata, validLangu
 export default defineBackground(() => {
   // Fail closed: do not save/read a secret unless content-script access is off.
   const protectedStorage = browser.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).then(() => true, () => false);
-  const active = new Map<string, AbortController>();
+  const active = new Map<string, { controller: AbortController; tabId?: number; videoId?: string }>();
   const storageKey = 'supadata-v1';
+  const validKey = (value: unknown): value is string => typeof value === 'string' && /^[\x21-\x7e]{8,512}$/.test(value);
   async function settings() {
     if (!await protectedStorage) throw new SupadataError('无法限制密钥存储访问，已停止');
     const result = (await browser.storage.local.get(storageKey))[storageKey];
-    return { key: record(result) && typeof result.key === 'string' ? result.key : '',
+    return { key: record(result) && validKey(result.key) ? result.key : '',
       language: record(result) && validLanguage(result.language) ? result.language : 'en' };
   }
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -24,15 +25,19 @@ export default defineBackground(() => {
       if (message.type === 'save' || message.type === 'delete') {
         if (!fromOptions) throw new SupadataError('只允许在设置页修改密钥');
         if (message.type === 'delete') {
-          for (const controller of active.values()) controller.abort();
+          for (const task of active.values()) task.controller.abort();
           await browser.storage.local.remove(storageKey);
+          await browser.permissions.remove({ origins: [SUPADATA_ORIGIN] }).catch(() => false);
           return { ok: true, settings: { hasKey: false, language: 'en' } };
         }
-        if (!validLanguage(message.language) || typeof message.key !== 'string') throw new SupadataError('Key 或语言格式不正确');
+        const language = typeof message.language === 'string' ? message.language.trim() : '';
+        if (!validLanguage(language) || typeof message.key !== 'string') throw new SupadataError('Key 或语言格式不正确');
+        if (typeof message.key !== 'string' || message.key.length > 512) throw new SupadataError('请输入有效 Key（不含空白字符）');
         const key = message.key.trim() || config.key;
-        if (!key || !/^[\x21-\x7e]{8,512}$/.test(key)) throw new SupadataError('请输入有效 Key（不含空白字符）');
-        await browser.storage.local.set({ [storageKey]: { key, language: message.language } });
-        return { ok: true, settings: { hasKey: true, language: message.language } };
+        if (!validKey(key)) throw new SupadataError('请输入有效 Key（不含空白字符）');
+        for (const task of active.values()) task.controller.abort();
+        await browser.storage.local.set({ [storageKey]: { key, language } });
+        return { ok: true, settings: { hasKey: true, language } };
       }
       if (message.type !== 'test' && message.type !== 'transcript') throw new SupadataError('未知服务操作');
       if (message.type === 'test' && !fromOptions || message.type === 'transcript' && !fromPanel) throw new SupadataError('服务操作来源不匹配');
@@ -46,13 +51,14 @@ export default defineBackground(() => {
           if (!validLanguage(message.language)) throw new SupadataError('字幕请求语言非法');
           requestedLanguage = message.language;
         }
-        if (!Number.isInteger(message.tabId) || typeof message.videoId !== 'string') throw new SupadataError('视频绑定参数异常');
+        if (!Number.isInteger(message.tabId) || Number(message.tabId) <= 0 || typeof message.videoId !== 'string') throw new SupadataError('视频绑定参数异常');
         const tab = await browser.tabs.get(message.tabId as number);
         if (!tab.url || watchVideoId(tab.url) !== message.videoId) throw new SupadataError('标签页视频已切换，未发送请求');
         videoId = message.videoId;
       }
       if (active.has(operation)) throw new SupadataError('已有请求进行中，请勿重复点击');
-      const controller = new AbortController(); active.set(operation, controller);
+      const controller = new AbortController();
+      active.set(operation, { controller, ...(message.type === 'transcript' ? { tabId: message.tabId as number, videoId } : {}) });
       const timeout = setTimeout(() => controller.abort(), message.type === 'test' ? 15_000 : 90_000);
       try {
         if (message.type === 'test') return { ok: true, account: await testSupadata(config.key, controller.signal) };
@@ -60,13 +66,21 @@ export default defineBackground(() => {
         const tab = await browser.tabs.get(message.tabId as number);
         if (!tab.url || watchVideoId(tab.url) !== videoId) throw new SupadataError('视频已切换，服务结果已丢弃');
         return { ok: true, data: result.data, requestedLanguage };
-      } finally { clearTimeout(timeout); active.delete(operation); }
+      } finally {
+        clearTimeout(timeout);
+        if (active.get(operation)?.controller === controller) active.delete(operation);
+      }
     };
     void respond().then(sendResponse, error => sendResponse({ ok: false,
       error: error instanceof SupadataError ? error.message : '服务请求失败或超时，请检查网络后手动重试（不会自动重新提交）' }));
     return true;
   });
+  browser.tabs.onRemoved.addListener(tabId => { active.get(`tab:${tabId}`)?.controller.abort(); });
+  browser.tabs.onUpdated.addListener((tabId, change) => {
+    const task = active.get(`tab:${tabId}`);
+    if (task?.videoId && typeof change.url === 'string' && watchVideoId(change.url) !== task.videoId) task.controller.abort();
+  });
   browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {
-    console.warn('YouTube Language Helper: side panel setup failed');
+    console.warn('Video Language Helper: side panel setup failed');
   });
 });

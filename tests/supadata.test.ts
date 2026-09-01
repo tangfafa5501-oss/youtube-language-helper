@@ -24,6 +24,12 @@ test('Supadata preserves provider order, duplicates, raw fields and abnormal tim
   assert.ok(parsed.cues[2].timingIssue); assert.equal(parsed.cues[0].timingSource, 'offset+duration');
   assert.throws(() => parseSupadata({ ...raw, content: [] }));
 });
+
+test('Supadata rejects non-JSON structures and one pathological text row safely', () => {
+  const circular: any = { lang: 'en', content: [] }; circular.content.push(circular);
+  assert.throws(() => parseSupadata(circular), /未返回可用/);
+  assert.throws(() => parseSupadata({ lang: 'en', content: [{ text: 'x'.repeat(200_001), offset: 0, duration: 1 }] }), /过长/);
+});
 test('Supadata errors are mapped without leaking server response or key, and never retried', async () => {
   for (const status of [401, 402, 403, 404, 429, 500, 206]) {
     let calls = 0;
@@ -74,6 +80,14 @@ test('account test does not send a video or expose account identity', async () =
     return Response.json({ plan: 'test', maxCredits: 100, usedCredits: 2, organizationId: 'private-account' });
   });
   assert.deepEqual(result, { plan: 'test', maxCredits: 100, usedCredits: 2 });
+});
+
+test('account test rejects negative, fractional and blank account summaries', async () => {
+  for (const body of [
+    { plan: '', maxCredits: 100, usedCredits: 2 },
+    { plan: 'test', maxCredits: -1, usedCredits: 0 },
+    { plan: 'test', maxCredits: 100.5, usedCredits: 2 },
+  ]) await assert.rejects(testSupadata('fixture-key', new AbortController().signal, async () => Response.json(body)), /账户接口/);
 });
 test('only exact own-extension settings/sidepanel senders can use the service', () => {
   assert.equal(trustedServiceSender({ id: 'own', url: 'chrome-extension://own/options.html' }, 'own', 'options'), true);

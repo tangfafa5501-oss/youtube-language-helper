@@ -53,6 +53,24 @@ test('JSON3 ASR segment offsets become absolute word timings without text interp
     { text: ' world', startMs: 1650, endMs: 3000 },
   ]);
 });
+
+test('word timings reject missing, duplicate, decreasing and out-of-event offsets', () => {
+  const parse = (segs: unknown[]) => parseJson3WordTimings(JSON.stringify({ events: [{ tStartMs: 1000, dDurationMs: 2000, segs }] }));
+  for (const segments of [
+    [{ utf8: 'one' }, { utf8: ' two' }],
+    [{ utf8: 'one', tOffsetMs: 0 }, { utf8: ' two', tOffsetMs: 0 }],
+    [{ utf8: 'one', tOffsetMs: 1000 }, { utf8: ' two', tOffsetMs: 500 }],
+    [{ utf8: 'one', tOffsetMs: 0 }, { utf8: ' two', tOffsetMs: 2000 }],
+  ]) assert.throws(() => parse(segments), /分词时间/);
+});
+
+test('word timing input is bounded before producing an oversized alignment workload', () => {
+  const tooManyEvents = { events: Array.from({ length: 40_001 }, () => ({})) };
+  assert.throws(() => parseJson3WordTimings(JSON.stringify(tooManyEvents)), /事件过多/);
+  const tooManySegments = { events: [{ tStartMs: 0, dDurationMs: 30_000,
+    segs: Array.from({ length: 20_001 }, (_, index) => ({ utf8: 'x', tOffsetMs: index })) }] };
+  assert.throws(() => parseJson3WordTimings(JSON.stringify(tooManySegments)), /分词条目过多/);
+});
 test('navigation and track changes reject late replies including A -> B -> A', () => {
   const session = new SessionGate(); const a = session.next();
   const b = session.next(); const aAgain = session.next();

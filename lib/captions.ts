@@ -55,20 +55,30 @@ export function parseJson3WordTimings(body: string): WordTiming[] {
   if (body.length > 8_000_000) throw new Error('字幕响应过大，未读取词级时间');
   let data: unknown;
   try { data = JSON.parse(body); } catch { throw new Error('词级字幕响应不是 JSON3'); }
-  if (!record(data) || !Array.isArray(data.events)) throw new Error('词级字幕 JSON3 结构不支持');
+  if (!record(data) || !Array.isArray(data.events) || data.events.length > 40_000) throw new Error('词级字幕 JSON3 结构不支持或事件过多');
   const words: WordTiming[] = [];
   for (const event of data.events) {
     if (!record(event) || !Array.isArray(event.segs)) continue;
     const eventStart = time(event.tStartMs), duration = time(event.dDurationMs);
     if (eventStart === null || duration === null || duration <= 0) continue;
+    if (event.segs.length > 20_000 || words.length + event.segs.length > 100_000) throw new Error('词级字幕分词条目过多');
     const segments = event.segs.filter(record);
+    const offsets: number[] = [];
+    for (let index = 0; index < segments.length; index++) {
+      const value = time(segments[index]!.tOffsetMs);
+      const offset = value ?? (index === 0 ? 0 : Number.NaN);
+      if (!Number.isFinite(offset) || offset < 0 || offset >= duration || index && offset <= offsets[index - 1]!) {
+        throw new Error('词级字幕分词时间缺失、倒序或超出事件范围');
+      }
+      offsets.push(offset);
+    }
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i]!;
       if (typeof segment.utf8 !== 'string' || !segment.utf8.trim()) continue;
-      const offset = time(segment.tOffsetMs) ?? 0;
-      const nextOffset = i + 1 < segments.length ? time(segments[i + 1]!.tOffsetMs) : null;
+      const offset = offsets[i]!;
+      const nextOffset = i + 1 < segments.length ? offsets[i + 1]! : duration;
       const startMs = eventStart + offset;
-      const endMs = eventStart + (nextOffset !== null && nextOffset > offset ? nextOffset : duration);
+      const endMs = eventStart + nextOffset;
       if (endMs > startMs) words.push({ text: segment.utf8, startMs, endMs });
     }
   }
