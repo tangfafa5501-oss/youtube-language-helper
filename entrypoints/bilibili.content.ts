@@ -15,11 +15,16 @@ export default defineContentScript({
     async function pageMetadataTracks(current: { bvid: string; page: number }) {
       const requestId = crypto.randomUUID();
       return await new Promise<{ metadata: Awaited<ReturnType<typeof biliMetadata>>; tracks: BiliTrack[]; needLogin: boolean } | null>((resolve, reject) => {
-        const timeout = setTimeout(() => { removeEventListener('message', receive); resolve(null); }, 300);
+        let timeout = setTimeout(() => { removeEventListener('message', receive); resolve(null); }, 1_000);
         function receive(event: MessageEvent) {
           const message = event.data;
           if (event.source !== window || event.origin !== location.origin || !record(message) || message.channel !== BILI_CHANNEL
             || message.direction !== 'response' || message.version !== 1 || message.requestId !== requestId) return;
+          if (message.stage === 'accepted') {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => { removeEventListener('message', receive); reject(new Error('B站字幕轨请求超时')); }, 16_000);
+            return;
+          }
           clearTimeout(timeout); removeEventListener('message', receive);
           if (typeof message.error === 'string') { reject(new Error(message.error)); return; }
           if (!record(message.metadata) || !Number.isFinite(message.metadata.aid) || !Number.isFinite(message.metadata.cid)

@@ -1,4 +1,4 @@
-import { biliMetadata, biliTracks, biliVideo } from '../lib/bilibili';
+import { biliMetadata, biliTracks, biliVideo, bvidToAid } from '../lib/bilibili';
 import { record } from '../lib/captions';
 
 const BILI_CHANNEL = 'ylh-bilibili-page-v1';
@@ -19,10 +19,20 @@ export default defineContentScript({
       if (!current || message.bvid !== current.bvid || message.page !== current.page) {
         reply({ error: 'B站视频已切换' }); return;
       }
+      // Acknowledge synchronously so the isolated content script knows the
+      // page-session bridge exists and must not start a duplicate fallback.
+      reply({ stage: 'accepted' });
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15_000);
       try {
-        const metadata = await biliMetadata(current.bvid, current.page, controller.signal);
+        const currentCidElement = document.querySelector('.bpx-state-multi-active-item[data-cid]')
+          ?? document.querySelector('[data-cid][aria-current="true"]')
+          ?? document.querySelector('[data-cid]');
+        const pageCid = Number(currentCidElement?.getAttribute('data-cid'));
+        const pageAid = bvidToAid(current.bvid);
+        const metadata = pageAid && Number.isFinite(pageCid) && pageCid > 0
+          ? { aid: pageAid, cid: pageCid, title: document.querySelector('h1')?.textContent?.trim().slice(0, 1000) || document.title.slice(0, 1000) }
+          : await biliMetadata(current.bvid, current.page, controller.signal);
         const result = await biliTracks(current.bvid, metadata.aid, metadata.cid, controller.signal);
         if (biliVideo(location.href)?.bvid !== current.bvid) throw new Error('B站视频已切换');
         reply({ metadata, tracks: result.tracks, needLogin: result.needLogin });

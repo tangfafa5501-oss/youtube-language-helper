@@ -9,22 +9,28 @@ const mainCode = await readFile(new URL('../../.output/chrome-mv3/content-script
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const events = () => { const listeners = new Set(); return { addListener: fn => listeners.add(fn), emit: value => { for (const fn of listeners) fn(value); } }; };
 
-async function harness(t, { withMain = false, separateTracks = false, delayEnglish = false } = {}) {
+async function harness(t, { withMain = false, separateTracks = false, delayEnglish = false, metadataDelayMs = 0, pageCid = '2' } = {}) {
   const timers = new Set(), connect = events(), document = new EventTarget();
   const requests = [];
   const video = { readyState: 4, currentTime: 0, paused: true, playbackRate: 1,
     play: async () => { video.paused = false; }, pause: () => { video.paused = true; } };
-  document.title = 'Synthetic Bilibili'; document.querySelector = () => video;
+  document.title = 'Synthetic Bilibili';
+  document.querySelector = selector => selector === '.bpx-state-multi-active-item[data-cid]'
+    ? (pageCid ? { getAttribute: name => name === 'data-cid' ? pageCid : null } : null)
+    : selector === '[data-cid][aria-current="true"]' ? null
+    : selector === '[data-cid]' ? { getAttribute: name => name === 'data-cid' ? 'stale-first-part' : null }
+    : selector === 'h1' ? { textContent: 'Synthetic Bilibili' } : video;
   const location = { href: 'https://www.bilibili.com/video/BV1GJ411x7h7/?p=1' };
   const img = '7cd084941338484aae1ad9425b84077c', sub = '4932caff0ff746eab6f01bf08b70ac45';
   const fetch = async url => {
     const value = String(url);
     requests.push(value);
-    if (value.includes('/x/web-interface/view')) return Response.json({ code: 0, data: { aid: 1, cid: 2, title: 'Synthetic', pages: [{ page: 1, cid: 2, part: 'Part one' }] } });
+    if (value.includes('/x/web-interface/view')) { if (metadataDelayMs) await sleep(metadataDelayMs); return Response.json({ code: 0, data: { aid: 1, cid: 2, title: 'Synthetic', pages: [{ page: 1, cid: 2, part: 'Part one' }] } }); }
     if (value.includes('/x/web-interface/nav')) return Response.json({ code: 0, data: { wbi_img: { img_url: `https://i0.hdslb.com/${img}.png`, sub_url: `https://i0.hdslb.com/${sub}.png` } } });
     if (value.includes('/x/player/wbi/v2')) return Response.json({ code: 0, data: { subtitle: { subtitles: separateTracks ? [
       { id: 1, lan: 'en-US', lan_doc: 'English', subtitle_url: '//i0.hdslb.com/en.json' },
-      { id: 2, lan: 'zh-CN', lan_doc: '中文', subtitle_url: '//i0.hdslb.com/zh.json' },
+      { id: 2, lan: 'zh-CN', lan_doc: '中文（中国）', subtitle_url: '//i0.hdslb.com/zh-mixed.json' },
+      { id: 3, lan: 'zh-Hans', lan_doc: '中文（简体）', subtitle_url: '//i0.hdslb.com/zh.json' },
     ] : [
       { id: 1, lan: 'en-US', lan_doc: 'English', subtitle_url: '//i0.hdslb.com/en.json' },
       { id: 2, lan: 'zh-CN', lan_doc: '中英双语', subtitle_url: '//i0.hdslb.com/bilingual.json' },
@@ -32,6 +38,9 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
     if (value.includes('en.json')) { if (delayEnglish) await sleep(80); return Response.json({ body: [
       { from: 1, to: 4, content: 'Hello students.' }, { from: 4, to: 7, content: 'Second line.' },
     ] }); }
+    if (value.includes('zh-mixed.json')) return Response.json({ body: [
+      { from: 1, to: 7, content: '同学们好 Hello students. 第二句 Second line.' },
+    ] });
     if (value.includes('zh.json')) return Response.json({ body: [
       { from: 1, to: 7, content: '同学们好。第二句。' },
     ] });
@@ -56,7 +65,7 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
   const port = { name: 'ylh-panel-v1', sender: { id: 'test-extension', url: 'chrome-extension://test-extension/sidepanel.html' },
     onMessage, onDisconnect, postMessage: message => messages.push(structuredClone(message)), disconnect: () => onDisconnect.emit() };
   connect.emit(port);
-  for (let i = 0; i < 50 && !messages.some(message => message.status === 'loaded'); i++) await sleep(10);
+  for (let i = 0; i < 200 && !messages.some(message => message.status === 'loaded'); i++) await sleep(10);
   t.after(() => { port.disconnect(); for (const timer of timers) clearInterval(timer); });
   const state = () => messages.filter(message => message.version === 1).at(-1);
   const send = message => onMessage.emit({ version: 1, videoId: state().video.videoId, session: state().video.session, ...message });
@@ -67,9 +76,16 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
 test('production Bilibili page bridge reuses the website session and combines its existing primary/secondary tracks', async t => {
   const h = await harness(t, { withMain: true, separateTracks: true });
   assert.equal(h.state().status, 'loaded');
-  assert.equal(h.state().language, 'en-US+zh-CN');
+  assert.equal(h.state().language, 'en-US+zh-Hans');
   assert.equal(h.state().cues[0].text, 'Hello students. Second line.\n同学们好。第二句。');
   assert.deepEqual([h.state().cues[0].startMs, h.state().cues[0].endMs], [1000, 7000]);
+  assert.equal(h.requests.filter(url => url.includes('/x/web-interface/view')).length, 0);
+  assert.equal(h.requests.filter(url => url.includes('/x/player/wbi/v2')).length, 1);
+});
+
+test('a slow page-session bridge is acknowledged and never triggers duplicate fallback requests', async t => {
+  const h = await harness(t, { withMain: true, separateTracks: true, metadataDelayMs: 700, pageCid: null });
+  assert.equal(h.state().status, 'loaded');
   assert.equal(h.requests.filter(url => url.includes('/x/web-interface/view')).length, 1);
   assert.equal(h.requests.filter(url => url.includes('/x/player/wbi/v2')).length, 1);
 });

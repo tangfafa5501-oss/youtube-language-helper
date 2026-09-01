@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { biliPhrases, biliVideo, chooseBiliTrack, isBiliTrack, pairBiliCues } from '../lib/bilibili.ts';
+import { biliPhrases, biliVideo, bvidToAid, chooseBiliTrack, isBiliTrack, pairBiliCues } from '../lib/bilibili.ts';
 import { md5 } from '../lib/bilibili-wbi.ts';
 import type { RawCue } from '../lib/captions.ts';
 
@@ -11,6 +11,13 @@ test('Bilibili URL/page parsing and WBI MD5 match known platform inputs', () => 
   for (const sample of ['', 'abc', '中文字幕测试', 'a'.repeat(64)]) {
     assert.equal(md5(sample), createHash('md5').update(sample).digest('hex'));
   }
+});
+
+test('modern Bilibili BV ids convert locally to their exact numeric aid', () => {
+  assert.equal(bvidToAid('BV17x411w7KC'), 170001);
+  assert.equal(bvidToAid('BV1XB4y1P7xd'), 587415431);
+  assert.equal(bvidToAid('invalid'), null);
+  assert.equal(bvidToAid('BV1XB4y1P7x0'), null);
 });
 
 test('Bilibili page-bridge tracks only accept official HTTPS subtitle hosts', () => {
@@ -72,4 +79,27 @@ test('Bilibili bilingual pairing preserves front, middle and post-20-minute real
   assert.deepEqual([paired.at(-1)?.startMs, paired.at(-1)?.endMs], [1200000, 1202000]);
   assert.equal(paired.reduce((total, item) => total + (item.raw as { primary: unknown[] }).primary.length, 0), primary.length);
   assert.equal(paired.reduce((total, item) => total + (item.raw as { secondary: unknown[] }).secondary.length, 0), secondary.length);
+});
+
+test('Bilibili rolling bilingual captions stay lane-ordered, deduplicated and at most six seconds per derived phrase', () => {
+  const cue = (prefix: string, index: number, text: string, startMs: number, endMs: number) => ({ cueId: `${prefix}:${index}`, sourceIndex: index,
+    text, startMs, endMs, timingSource: 'start+duration' as const, timingIssue: null, raw: { content: text, from: startMs / 1000, to: endMs / 1000 } });
+  const paired = pairBiliCues([
+    cue('en', 0, 'These examples show us', 0, 2500),
+    cue('en', 1, 'These examples show us that languages descended from Latin,', 2500, 5200),
+    cue('en', 2, 'that languages descended from Latin, English and Swedish followed.', 5200, 9000),
+  ], [
+    cue('zh', 0, '这些例子告诉我们', 0, 3000),
+    cue('zh', 1, '这些例子告诉我们很多语言来源于拉丁语', 3000, 6200),
+    cue('zh', 2, '很多语言来源于拉丁语，英语和瑞典语也是如此。', 6200, 9000),
+  ]);
+  const phrases = biliPhrases(paired);
+  assert.ok(phrases.length >= 2);
+  assert.ok(phrases.every(phrase => phrase.endMs - phrase.startMs <= 6000));
+  assert.ok(phrases.every(phrase => phrase.text.split('\n').length <= 2));
+  const text = phrases.map(phrase => phrase.text).join('\n');
+  assert.equal(text.match(/These examples show us/g)?.length, 1);
+  assert.equal(text.match(/这些例子告诉我们/g)?.length, 1);
+  assert.match(text, /English and Swedish followed\./);
+  assert.match(text, /英语和瑞典语也是如此。/);
 });
