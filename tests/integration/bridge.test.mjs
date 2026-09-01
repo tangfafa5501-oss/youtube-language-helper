@@ -186,7 +186,7 @@ test('production timing keeps punctuation and semantic phrases ahead of the six-
     && phrase.endMs - phrase.startMs <= 10_000));
   assert.equal(h.state().phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });
-test('failed YouTube word alignment still publishes hard 2-6 second SBD phrases from Supadata timing', async t => {
+test('failed YouTube word alignment still publishes 2-second-minimum SBD phrases from Supadata timing', async t => {
   const h = await harness(t);
   const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
   const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';

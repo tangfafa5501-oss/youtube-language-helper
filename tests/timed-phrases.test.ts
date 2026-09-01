@@ -27,6 +27,18 @@ test('a sub-2 second phrase merges forward and spelling substitutions still alig
   assert.equal(phrases[0]!.endMs, 3500);
 });
 
+test('successive sub-2 second sentences keep merging forward until the group reaches two seconds', () => {
+  const text = 'Again. I just want to reiterate. This is very relaxed, casual speech.';
+  const values = text.match(/[A-Za-z]+/g)!;
+  const ends = [300, 500, 700, 900, 1_100, 1_440, 1_800, 2_200, 2_600, 3_000, 3_500, 4_500];
+  const timings = values.map((value, index) => word(value, index ? ends[index - 1]! : 0, ends[index]!));
+  const phrases = buildTimedPhrases([{ ...cue(text), endMs: 4_500 }], timings);
+  assert.deepEqual(phrases.map(item => item.text), [
+    'Again.\nI just want to reiterate.\nThis is very relaxed, casual speech.',
+  ]);
+  assert.deepEqual(phrases.map(item => [item.startMs, item.endMs]), [[0, 4_500]]);
+});
+
 test('a long sentence tail receives its own word-level timestamp', () => {
   const text = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
   const words = text.match(/[A-Za-z]+|100/g)!;

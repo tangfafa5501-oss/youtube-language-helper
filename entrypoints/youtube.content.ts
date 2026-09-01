@@ -164,8 +164,11 @@ export default defineContentScript({
         if (!gate.current(token) || !clients.has(port) || state.video?.session !== v.session || state.trackId !== `supadata:${message.requestId}`) return;
         if (r.videoId !== v.videoId || r.session !== v.session || typeof r.body !== 'string') throw new Error('词级时间响应会话不匹配');
         const phrases = buildTimedPhrases(state.cues, parseJson3WordTimings(r.body));
+        const estimatedCount = phrases.filter(phrase => phrase.timing === 'youtube-estimated').length;
         state = { ...state, phrases, message: '字幕与独立语段时间已就绪',
-          timingMessage: `已用 YouTube 词级时间生成 ${phrases.length} 个自然语段；标点和语义优先，6秒为建议目标` };
+          timingMessage: estimatedCount
+            ? `已生成 ${phrases.length} 个自然语段：${phrases.length - estimatedCount} 个使用 YouTube 词时间，${estimatedCount} 个局部边界按 Supadata 原始时间估算`
+            : `已生成 ${phrases.length} 个自然语段，全部使用 YouTube 词时间` };
       } catch {
         if (!gate.current(token)) return;
         state = { ...state, phrases: estimatedPhrases, message: '字幕与估算语段时间已就绪',
