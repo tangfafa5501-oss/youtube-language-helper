@@ -3,10 +3,30 @@ import type { TimedPhrase } from './timed-phrases.ts';
 
 export const CHANNEL = 'ylh-page-v1';
 export const PORT = 'ylh-panel-v1';
-export const PLAYBACK_RATES = [.5, .75, .8, .9, 1, 1.1, 1.25, 1.5, 2] as const;
+// Keep the public player controls compatible with Enjoy's current media player.
+export const PLAYBACK_RATES = [.75, .8, .9, 1] as const;
 export function isPlaybackRate(value: unknown): value is (typeof PLAYBACK_RATES)[number] {
   return typeof value === 'number' && (PLAYBACK_RATES as readonly number[]).includes(value);
 }
+
+export function adjacentPlaybackRate(current: number, direction: -1 | 1) {
+  const index = (PLAYBACK_RATES as readonly number[]).indexOf(current);
+  if (index < 0) return 1;
+  return PLAYBACK_RATES[index + direction] ?? current;
+}
+
+export const PLAYER_SHORTCUTS = {
+  playOrPause: 'Space',
+  previous: 'KeyA',
+  replay: 'KeyS',
+  next: 'KeyD',
+  toggleEcho: 'KeyE',
+  toggleDictation: 'KeyH',
+  record: 'KeyR',
+  playRecording: 'KeyG',
+  decreaseRate: 'Comma',
+  increaseRate: 'Period',
+} as const;
 export type Track = { id: string; fingerprint: string; name: string; language: string; kind: 'manual' | 'asr' };
 export type VideoInfo = { videoId: string; title: string; session: string; tracks: Track[]; availability: string; platform?: 'youtube' | 'bilibili' };
 export type State = {

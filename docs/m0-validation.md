@@ -1,8 +1,26 @@
 # M0 验证记录
 
+## 2026-09-01 Enjoy 工作流与功能回归
+
+本轮修正了“外表接近但功能不符”的问题。YouTube 在已保存 Key 时按新视频 session 自动读取一次字幕；首屏只保留“视频已连接”和获取进度，不再显示视频大标题、语言表单、手动读取按钮或 Supadata 说明。已加载页补齐 Enjoy 风格的三点菜单、使用引导、完整快捷键说明、跟读/听写开关和底部控制；扩展显示名移除了开发阶段的 `· M0` 后缀。
+
+浏览器验证加载 `.output/chrome-mv3` 的真实生产 JS/CSS，并使用模拟 Chrome Port、网站双语字幕、保存 Key 和 MediaRecorder 驱动，因此能证明 UI 与前端状态机，但不等于已安装扩展、真实 Supadata 调用或真实麦克风采音。420×900 结果如下：
+
+| 检查 | 生产包浏览器结果 |
+| --- | --- |
+| 自动获取 | 新 YouTube session 只出现 1 个 `supadata-begin` 和 1 次 transcript 调用；页面没有手动“读取字幕”或语言表单 |
+| 加载布局 | 绿色“视频已连接”、加载卡片、旋转图标和进度条可见；`scrollWidth=420`、`scrollHeight=900`，无多余滚动；控制台无 error/warn |
+| 菜单与后台入口 | 三点菜单包含“重新获取字幕 / 显示引导 / 设置”；刷新消息已发送，引导打开，设置入口调用一次 |
+| 点击与 A/S/D | 首句点击定位 `40 ms`，D 到 `5040 ms`，A 回 `40 ms`，S 重播仍为 `40 ms` |
+| 倍速与模式 | `Shift+<` 得到 `0.9×`，`Shift+>` 回 `1×`；E 得到 `single→all→single`；H 正确切换听写隐藏状态 |
+| 连续录音 | 第一次停止后 `1/1`；第二次录音进行中 `recordStarts=2 / recordStops=1`，证明没有被旧清理立即停止；最终 `2/2`、两条流均释放，G 回放一次，Esc 清除播放器 |
+| 焦点回归 | 点击字幕使按钮获得焦点后，Space/K/D/A/S/E/H/R/G 仍生效；工具栏或菜单按钮聚焦时 Space 保留原生操作 |
+
+截图：`docs/evidence/enjoy-loading-production-simulated.png`、`docs/evidence/enjoy-loaded-production-simulated.png`、`docs/evidence/enjoy-menu-production-simulated.png`、`docs/evidence/enjoy-shortcuts-production-simulated.png`。最终自动化为 **92/92 单元测试、54/54 生产 bundle 集成测试、TypeScript 类型检查、生产构建和 `git diff --check` 全部通过**。
+
 ## 2026-09-01 本轮 100 项改进收口
 
-本轮在既有真实 YouTube/B站证据之上完成 `docs/improvement-ledger.md` 的 100/100 项有效改进。最终自动化结果为 **91/91 单元测试、54/54 生产 bundle 集成测试、TypeScript 类型检查、生产构建和 `git diff --check` 全部通过**。集成测试覆盖 YouTube 与 B站点击/播放协议、单句/循环/连续边界、同 BV 分 P、SPA、切轨、两个标签页、断开连接、Supadata 服务边界和设置持久化。
+本轮在既有真实 YouTube/B站证据之上完成 `docs/improvement-ledger.md` 的首批 100/100 项有效改进。当前最终自动化结果为 **92/92 单元测试、54/54 生产 bundle 集成测试、TypeScript 类型检查、生产构建和 `git diff --check` 全部通过**。集成测试覆盖 YouTube 与 B站点击/播放协议、单句/循环/连续边界、同 BV 分 P、SPA、切轨、两个标签页、断开连接、Supadata 服务边界和设置持久化。
 
 本轮 Chrome 侧栏验收加载实际 `.output/chrome-mv3` 的生产 JS/CSS，并以模拟 Chrome Port、字幕和账户数据驱动。420×900 视口无横向溢出；英语自然语段在 `100 everyday words` 后进入下一个时间条；网站双语按英语/中文两行展示；语言、显示、播放模式、倍速、条目点击、上一/下一句、快捷键说明、API 设置和录音不支持提示均可操作；控制台无 error/warn。截图：`docs/evidence/sidepanel-production-preview-simulated.png`、`docs/evidence/options-production-preview-simulated.png`。
 

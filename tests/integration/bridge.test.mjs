@@ -116,12 +116,12 @@ test('production bridges preserve raw entries and seek a late cue on the bound v
 test('playback state follows the bound player and controls update the real video element', async t => {
   const h = await harness(t);
   h.video.currentTime = 12.24;
-  h.send({ version: 1, type: 'playback-rate', rate: 1.25, videoId: h.state().video.videoId, session: h.state().video.session });
+  h.send({ version: 1, type: 'playback-rate', rate: .9, videoId: h.state().video.videoId, session: h.state().video.session });
   h.send({ version: 1, type: 'playback-toggle', videoId: h.state().video.videoId, session: h.state().video.session });
   await new Promise(resolve => setTimeout(resolve, 300));
   const playback = h.messages.filter(message => message.type === 'playback-state').at(-1);
   assert.deepEqual(playback, { type: 'playback-state', videoId: h.state().video.videoId, session: h.state().video.session,
-    trackId: h.state().trackId, currentTimeMs: 12240, playing: true, rate: 1.25 });
+    trackId: h.state().trackId, currentTimeMs: 12240, playing: true, rate: .9 });
 });
 
 test('YouTube playback controls reject a stale subtitle track binding', async t => {

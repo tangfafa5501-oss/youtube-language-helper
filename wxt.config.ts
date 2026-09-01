@@ -3,7 +3,7 @@ import { defineConfig } from 'wxt';
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
-    name: 'Video Language Helper · M0',
+    name: 'Video Language Helper',
     description: '显示 YouTube / B 站字幕并按语段定位、循环和跟读。无 AI、无账号同步。',
     minimum_chrome_version: '120',
     permissions: ['sidePanel', 'storage'],
