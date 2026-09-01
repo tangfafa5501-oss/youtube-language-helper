@@ -1,0 +1,24 @@
+# Dependencies and build output
+node_modules/
+.output/
+.wxt/
+dist/
+coverage/
+test-results/
+playwright-report/
+
+# Private configuration and captured user data
+.env
+.env.*
+!.env.example
+*.log
+local-data/
+recordings/
+private-fixtures/
+
+# Third-party published bundles are research-only, not redistribution assets
+research/enjoy-echo/
+
+# OS/editor artifacts
+Thumbs.db
+.DS_Store
