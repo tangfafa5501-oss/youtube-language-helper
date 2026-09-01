@@ -33,9 +33,35 @@ test('a long sentence tail receives its own word-level timestamp', () => {
   const timings = words.map((value, index) => word(value, index * 500, index * 500 + 500));
   const phrases = buildTimedPhrases([cue(text)], timings);
   assert.deepEqual(phrases.map(({ text: phrase, startMs, endMs }) => ({ phrase, startMs, endMs })), [
-    { phrase: 'Today, I am very excited to help you pronounce 100 everyday words', startMs: 0, endMs: 6000 },
-    { phrase: 'in my Modern Received Pronunciation accent.', startMs: 6000, endMs: 9000 },
+    { phrase: 'Today, I am very excited to help you pronounce', startMs: 0, endMs: 4500 },
+    { phrase: '100 everyday words in my Modern Received Pronunciation accent.', startMs: 4500, endMs: 9000 },
   ]);
+});
+
+test('sentence punctuation wins before five seconds and never absorbs the next sentence opening', () => {
+  const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
+  const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
+  const text = `${first} ${second}`;
+  const words = text.match(/[A-Za-z]+|100/g)!;
+  const firstWords = first.match(/[A-Za-z]+/g)!.length;
+  const timings = words.map((value, index) => index < firstWords
+    ? word(value, index * 350, index * 350 + 350)
+    : word(value, firstWords * 350 + (index - firstWords) * 450, firstWords * 350 + (index - firstWords + 1) * 450));
+  const phrases = buildTimedPhrases([cue(text)], timings);
+  assert.equal(phrases[0]!.text, first);
+  assert.equal(phrases[1]!.text.startsWith('Today, I am'), true);
+  assert.ok(phrases.every(phrase => phrase.endMs - phrase.startMs <= 5_000));
+  assert.equal(phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
+});
+
+test('one unmatched semantic split word does not discard every SBD phrase', () => {
+  const text = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
+  const words = text.match(/[A-Za-z]+|100/g)!;
+  const timings = words.map((value, index) => word(value === 'words' ? 'terms' : value, index * 500, index * 500 + 500));
+  const phrases = buildTimedPhrases([cue(text)], timings);
+  assert.ok(phrases.length >= 2);
+  assert.ok(phrases.every(phrase => phrase.endMs - phrase.startMs <= 5_000));
+  assert.equal(phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });
 
 test('unrelated same-length transcripts are rejected instead of receiving invented word times', () => {

@@ -1,5 +1,5 @@
 import type { RawCue, WordTiming } from './captions.ts';
-import { readingLines } from './reading-lines.ts';
+import { readingLines, readingSentences } from './reading-lines.ts';
 import { groupSentences } from './sentence-groups.ts';
 
 export type TimedPhrase = {
@@ -10,15 +10,19 @@ export type TimedPhrase = {
   timing: 'youtube-word' | 'bilibili-cue';
 };
 
-type Token = { value: string; phrase: number; startMs?: number; endMs?: number; automaticIndex?: number };
+type Token = { value: string; phrase: number; charStart: number; charEnd: number;
+  startMs?: number; endMs?: number; automaticIndex?: number };
 const tokenPattern = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
 const normalize = (value: string) => value.toLocaleLowerCase('en-US').replace(/’/g, "'");
 const MAX_ALIGNMENT_CELLS = 50_000_000;
 const MAX_ALIGNMENT_TOKENS = 12_000;
 const MAX_SHORT_MERGE_GAP_MS = 1_500;
+const MIN_PHRASE_MS = 2_000;
+const MAX_PHRASE_MS = 5_000;
 
 function tokens(text: string, phrase: number): Token[] {
-  return [...text.matchAll(tokenPattern)].map(match => ({ value: normalize(match[0]), phrase }));
+  return [...text.matchAll(tokenPattern)].map(match => ({ value: normalize(match[0]), phrase,
+    charStart: match.index!, charEnd: match.index! + match[0].length }));
 }
 
 function editDistance(a: string, b: string) {
@@ -81,6 +85,38 @@ function matches(a: Token[], b: Token[]): Array<[number, number]> {
   return result.reverse();
 }
 
+function timedTextPlan(cues: RawCue[]) {
+  let display = '';
+  const sentenceCharEnds: number[] = [], phraseCharEnds: number[] = [];
+  for (const group of groupSentences(cues)) {
+    for (const sentence of readingSentences(group.text)) {
+      if (display) display += '\n';
+      const sentenceStart = display.length;
+      display += sentence.text;
+      let cursor = 0;
+      for (const line of sentence.lines) {
+        const lineStart = sentence.text.indexOf(line, cursor);
+        if (lineStart < 0) throw new Error('断句文本无法映射回字幕，已保留原字幕');
+        cursor = lineStart + line.length;
+        phraseCharEnds.push(sentenceStart + cursor);
+      }
+      if (sentence.complete) sentenceCharEnds.push(display.length);
+    }
+  }
+  const manual = tokens(display, 0);
+  if (!manual.length) throw new Error('字幕没有可对齐的单词，已保留原字幕');
+  const charEnds = [...new Set([...sentenceCharEnds, ...phraseCharEnds])].sort((a, b) => a - b);
+  const tokenEndByChar = new Map<number, number>();
+  let tokenEnd = 0;
+  for (const charEnd of charEnds) {
+    while (tokenEnd < manual.length && manual[tokenEnd]!.charEnd <= charEnd) tokenEnd++;
+    if (tokenEnd) tokenEndByChar.set(charEnd, tokenEnd);
+  }
+  const sentenceEnds = new Set(sentenceCharEnds.map(end => tokenEndByChar.get(end)).filter((end): end is number => end !== undefined));
+  const phraseEnds = new Set(phraseCharEnds.map(end => tokenEndByChar.get(end)).filter((end): end is number => end !== undefined));
+  return { display, manual, sentenceEnds, phraseEnds };
+}
+
 export function buildTimedPhrases(cues: RawCue[], timings: WordTiming[]): TimedPhrase[] {
   for (let index = 0; index < timings.length; index++) {
     const timing = timings[index]!;
@@ -89,9 +125,7 @@ export function buildTimedPhrases(cues: RawCue[], timings: WordTiming[]): TimedP
       throw new Error('词级时间顺序异常，已保留原字幕而未猜测重排');
     }
   }
-  const phraseTexts = phraseTextsFromCues(cues);
-  const byPhrase = phraseTexts.map((text, index) => tokens(text, index));
-  const manual = byPhrase.flat();
+  const { display, manual, sentenceEnds, phraseEnds } = timedTextPlan(cues);
   const automatic: Token[] = [];
   for (const timing of timings) {
     for (const token of tokens(timing.text, -1)) automatic.push({ ...token, startMs: timing.startMs, endMs: timing.endMs });
@@ -101,40 +135,62 @@ export function buildTimedPhrases(cues: RawCue[], timings: WordTiming[]): TimedP
     manual[manualIndex]!.endMs = automatic[automaticIndex]!.endMs;
     manual[manualIndex]!.automaticIndex = automaticIndex;
   }
-  const result: TimedPhrase[] = [];
-  for (let index = 0; index < phraseTexts.length; index++) {
-    const phraseTokens = byPhrase[index]!;
-    const first = phraseTokens[0], last = phraseTokens.at(-1);
-    if (!first || !last) continue;
-    if (first.startMs === undefined) continue;
-    const endMs = last.endMs;
-    if (endMs === undefined || endMs <= first.startMs) continue;
-    const matched = phraseTokens.reduce((total, token) => total + Number(token.automaticIndex !== undefined), 0);
-    if (matched < Math.max(1, Math.ceil(phraseTokens.length * .6))) continue;
-    result.push({ id: `phrase:${index}:${first.startMs}`, text: phraseTexts[index]!,
-      startMs: first.startMs, endMs, timing: 'youtube-word' });
+  const matchedPrefix = new Uint32Array(manual.length + 1);
+  for (let index = 0; index < manual.length; index++) {
+    matchedPrefix[index + 1] = matchedPrefix[index]! + Number(manual[index]!.automaticIndex !== undefined);
   }
-  if (result.length !== phraseTexts.length) {
-    const present = new Set(result.map(item => Number(item.id.split(':')[1])));
-    const missing = phraseTexts.filter((_, index) => !present.has(index)).slice(0, 3).join(' / ');
-    throw new Error(`有 ${phraseTexts.length - result.length} 个语段未能对齐词级起点：${missing}`);
+  type Candidate = { end: number; startMs: number; endMs: number; duration: number };
+  const candidate = (start: number, end: number): Candidate | null => {
+    const first = manual[start], last = manual[end - 1];
+    if (!first || !last || first.startMs === undefined || last.endMs === undefined || last.endMs <= first.startMs) return null;
+    const matched = matchedPrefix[end]! - matchedPrefix[start]!;
+    if (matched < Math.max(1, Math.ceil((end - start) * .6))) return null;
+    if (end < manual.length && manual[end]!.startMs === undefined) return null;
+    return { end, startMs: first.startMs, endMs: last.endMs, duration: last.endMs - first.startMs };
+  };
+  const result: TimedPhrase[] = [];
+  let start = 0, charStart = 0;
+  while (start < manual.length) {
+    let sentenceChoice: Candidate | null = null, phraseChoice: Candidate | null = null;
+    let wordChoice: Candidate | null = null, finalChoice: Candidate | null = null;
+    const remaining = candidate(start, manual.length);
+    const balancedTarget = remaining && remaining.duration > MAX_PHRASE_MS
+      ? remaining.duration / Math.ceil(remaining.duration / MAX_PHRASE_MS) : MAX_PHRASE_MS;
+    for (let end = start + 1; end <= manual.length; end++) {
+      const last = manual[end - 1]!;
+      if (last.endMs === undefined) continue;
+      const firstStart = manual[start]!.startMs;
+      if (firstStart !== undefined && last.endMs - firstStart > MAX_PHRASE_MS) break;
+      const choice = candidate(start, end);
+      if (!choice) continue;
+      const nextStart = end < manual.length ? manual[end]!.startMs : undefined;
+      const separatedByGap = nextStart !== undefined && nextStart - choice.endMs > MAX_SHORT_MERGE_GAP_MS;
+      if (end === manual.length) finalChoice = choice;
+      if (choice.duration <= MIN_PHRASE_MS && !separatedByGap && end < manual.length) continue;
+      if (sentenceEnds.has(end)) { sentenceChoice = choice; break; }
+      if ((phraseEnds.has(end) || separatedByGap) && !phraseChoice) phraseChoice = choice;
+      if (!wordChoice || Math.abs(choice.duration - balancedTarget) < Math.abs(wordChoice.duration - balancedTarget)) {
+        wordChoice = choice;
+      }
+    }
+    const choice = sentenceChoice ?? phraseChoice ?? wordChoice ?? finalChoice;
+    if (!choice) throw new Error('字幕未能对齐到五秒内的可靠词界，已保留原字幕而未猜测时间');
+    const charEnd = choice.end < manual.length ? manual[choice.end]!.charStart : display.length;
+    const text = display.slice(charStart, charEnd).trim();
+    if (!text) throw new Error('词级断句产生空文本，已保留原字幕');
+    result.push({ id: `phrase:${result.length}:${choice.startMs}`, text,
+      startMs: choice.startMs, endMs: choice.endMs, timing: 'youtube-word' });
+    start = choice.end; charStart = charEnd;
   }
   for (let i = 0; i + 1 < result.length; i++) {
     if (result[i + 1]!.startMs > result[i]!.startMs && result[i]!.endMs > result[i + 1]!.startMs) {
       result[i]!.endMs = result[i + 1]!.startMs;
     }
   }
-  const merged: TimedPhrase[] = [];
-  for (let i = 0; i < result.length; i++) {
-    let current = { ...result[i]! };
-    while (i + 1 < result.length && current.endMs - current.startMs <= 2000
-      && result[i + 1]!.startMs - current.endMs <= MAX_SHORT_MERGE_GAP_MS) {
-      const next = result[++i]!;
-      current = { ...current, id: `${current.id}+${next.id}`, text: `${current.text}\n${next.text}`, endMs: next.endMs };
-    }
-    merged.push(current);
+  if (result.map(item => item.text).join('').replace(/\s/gu, '') !== display.replace(/\s/gu, '')) {
+    throw new Error('词级断句未完整保留字幕文本，已回退原字幕');
   }
-  return merged;
+  return result;
 }
 
 export function phraseTextsFromCues(cues: RawCue[]): string[] {

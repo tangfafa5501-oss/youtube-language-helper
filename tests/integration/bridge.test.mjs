@@ -24,6 +24,9 @@ async function harness(t) {
     { tStartMs: 1500, dDurationMs: 600, segs: [{ utf8: 'synthetic duplicate' }] },
     { tStartMs: 1_300_000, dDurationMs: 400, segs: [{ utf8: 'synthetic late cue' }] },
   ] });
+  let wordBody = JSON.stringify({ events: [
+    { tStartMs: 1_000, dDurationMs: 2_000, segs: [{ utf8: 'Hola', tOffsetMs: 0 }, { utf8: ' mundo', tOffsetMs: 1_000 }] },
+  ] });
   let pauseResponse = false; let releaseResponse;
   let plays = 0; let fetched; let adShowing = false;
   const video = { readyState: 4, duration: 1600, currentTime: 0, paused: true, playbackRate: 1,
@@ -48,9 +51,7 @@ async function harness(t) {
           { baseUrl: `/api/timedtext?v=${videoId}&lang=es&kind=asr&word=1`, languageCode: 'es', kind: 'asr' },
         ] } },
       });
-      if (String(url).includes('word=1')) return new Response(JSON.stringify({ events: [
-        { tStartMs: 1_000, dDurationMs: 2_000, segs: [{ utf8: 'Hola', tOffsetMs: 0 }, { utf8: ' mundo', tOffsetMs: 1_000 }] },
-      ] }));
+      if (String(url).includes('word=1')) return new Response(wordBody);
       const body = responseBody;
       if (pauseResponse) await new Promise(resolve => { releaseResponse = resolve; });
       return new Response(body);
@@ -92,7 +93,7 @@ async function harness(t) {
     heldInfoCount: () => runInContext('heldInfo.length', context),
     send: m => onMessage.emit({ trackId: state().trackId, ...m }),
     updateTracks: async ready => { tracksReady = ready; doc.dispatchEvent(new Event('yt-navigate-finish')); await tick(); },
-    setBody: body => { responseBody = body; }, pause: () => { pauseResponse = true; },
+    setBody: body => { responseBody = body; }, setWordBody: body => { wordBody = body; }, pause: () => { pauseResponse = true; },
     release: () => { releaseResponse?.(); },
     select: trackId => onMessage.emit({ version: 1, type: 'select', trackId, session: state().video.session }),
     navigate: async id => {
@@ -154,6 +155,29 @@ test('word timing follows the actual Supadata response language rather than the 
   assert.equal(new URL(h.fetched).searchParams.get('lang'), 'es');
   assert.equal(h.state().phrases[0].text, 'Hola mundo.');
   assert.equal(h.state().phrases[0].startMs, 1_000);
+});
+test('production timing keeps the period boundary, folds <=2s forward, and caps rows at five seconds', async t => {
+  const h = await harness(t);
+  const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
+  const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
+  const text = `${first} ${second}`, words = text.match(/[A-Za-z]+|100/g);
+  const firstWords = first.match(/[A-Za-z]+/g).length;
+  const offsets = words.map((_, index) => index < firstWords ? index * 350
+    : firstWords * 350 + (index - firstWords) * 450);
+  h.setWordBody(JSON.stringify({ events: [{ tStartMs: 0, dDurationMs: offsets.at(-1) + 450,
+    segs: words.map((word, index) => ({ utf8: `${index ? ' ' : ''}${word}`, tOffsetMs: offsets[index] })) }] }));
+  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'sbd-two-five' };
+  h.send({ ...binding, type: 'supadata-begin' });
+  h.send({ ...binding, type: 'supadata-finish', requestedLanguage: 'en', data: { lang: 'en', content: [
+    { offset: 0, duration: 5_000, text: `${first} Today, I am` },
+    { offset: 5_000, duration: offsets.at(-1) + 450 - 5_000, text: second.replace(/^Today, I am\s*/, '') },
+  ] } });
+  h.send({ ...binding, type: 'timing-load', language: 'en' });
+  for (let i = 0; i < 50 && !h.state().phrases?.length; i++) await tick();
+  assert.equal(h.state().phrases[0].text, first);
+  assert.equal(h.state().phrases[1].text.startsWith('Today, I am'), true);
+  assert.ok(h.state().phrases.every(phrase => phrase.endMs - phrase.startMs <= 5_000));
+  assert.equal(h.state().phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });
 test('single, loop, and all playback modes enforce Enjoy-compatible segment boundaries', async t => {
   const h = await harness(t); providerCues(h, [1_000, 2_000, 3_000]);

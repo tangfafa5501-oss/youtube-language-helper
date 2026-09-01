@@ -161,7 +161,7 @@ export default defineContentScript({
         if (r.videoId !== v.videoId || r.session !== v.session || typeof r.body !== 'string') throw new Error('词级时间响应会话不匹配');
         const phrases = buildTimedPhrases(state.cues, parseJson3WordTimings(r.body));
         state = { ...state, phrases, message: '字幕与独立语段时间已就绪',
-          timingMessage: `已用 YouTube 自动轨词级时间生成 ${phrases.length} 个独立时间语段；≤2秒语段已向后合并` };
+          timingMessage: `已用 YouTube 自动轨词级时间生成 ${phrases.length} 个语段；SBD句界优先，≤2秒向后合并，长句按5秒上限拆分` };
       } catch (error) {
         if (!gate.current(token)) return;
         state = { ...state, phrases: [], message: '字幕已读取；独立语段时间不可用',

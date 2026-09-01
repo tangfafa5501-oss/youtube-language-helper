@@ -5,6 +5,14 @@ import sbd from 'sbd';
 const wordCount = (text: string) => text.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
 const MAX_DISPLAY_TEXT = 200_000;
 
+export type ReadingSentence = {
+  text: string;
+  lines: string[];
+  complete: boolean;
+};
+
+const hasSentenceEnd = (text: string) => /[.!?][\s"'”’\)\]\}]*$/u.test(text);
+
 function phraseSentence(sentence: string): string[] {
   const cuts = new Set<number>();
   const commas: number[] = [];
@@ -100,24 +108,35 @@ function phraseSentence(sentence: string): string[] {
   return lines;
 }
 
-export function readingLines(text: string): string[] {
+export function readingSentences(text: string): ReadingSentence[] {
   // Source newlines may be arbitrary subtitle wrapping. Normalize only this
   // display copy; raw captions and the original-event view remain untouched.
   const display = text.replace(/\s+/gu, ' ').trim();
   if (!display) return [];
-  if (display.length > MAX_DISPLAY_TEXT) return [display];
+  if (display.length > MAX_DISPLAY_TEXT) return [{ text: display, lines: [display], complete: hasSentenceEnd(display) }];
   // SBD's default rules target English. Preserve mixed/CJK source text without
   // claiming English phrase heuristics work for bilingual captions.
   if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(display)) {
-    return text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    return text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+      .map(line => ({ text: line, lines: [line], complete: hasSentenceEnd(line) }));
   }
   let sentences: string[];
   try {
     sentences = sbd.sentences(display, { preserve_whitespace: true, newline_boundaries: false,
       html_boundaries: false, sanitize: false });
-  } catch { return [display]; }
-  if (!sentences.length || sentences.join('') !== display) return [display];
-  const lines = sentences.flatMap(phraseSentence);
+  } catch { return [{ text: display, lines: [display], complete: hasSentenceEnd(display) }]; }
+  if (!sentences.length || sentences.join('') !== display) {
+    return [{ text: display, lines: [display], complete: hasSentenceEnd(display) }];
+  }
+  const result = sentences.map(source => {
+    const sentence = source.trim(), lines = phraseSentence(sentence);
+    return { text: sentence, lines, complete: hasSentenceEnd(sentence) };
+  }).filter(sentence => sentence.text);
   // Reject any unexpected loss of text or punctuation; only whitespace may vary.
-  return lines.join(' ').replace(/\s/gu, '') === display.replace(/\s/gu, '') ? lines : [display];
+  return result.flatMap(sentence => sentence.lines).join(' ').replace(/\s/gu, '') === display.replace(/\s/gu, '')
+    ? result : [{ text: display, lines: [display], complete: hasSentenceEnd(display) }];
+}
+
+export function readingLines(text: string): string[] {
+  return readingSentences(text).flatMap(sentence => sentence.lines);
 }
