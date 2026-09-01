@@ -5,6 +5,14 @@ import type { TimedPhrase } from './timed-phrases.ts';
 
 export type BiliTrack = { id: string; name: string; language: string; kind: 'manual' | 'asr'; url: string;
   secondary?: { id: string; name: string; language: string; url: string } };
+
+function chineseTrackRank(track: BiliTrack) {
+  const label = `${track.language} ${track.name}`;
+  if (/zh-Hans|简体/i.test(label)) return 0;
+  if (/zh-CN|中国/i.test(label)) return 1;
+  if (/zh-Hant|繁体/i.test(label)) return 2;
+  return 3;
+}
 const MAX_BILI_PHRASE_MS = 6_000;
 const MAX_BILI_RESPONSE_BYTES = 8_000_000;
 const BVID_ALPHABET = 'FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf';
@@ -96,15 +104,8 @@ export async function biliTracks(bvid: string, aid: number, cid: number, signal?
   });
   const preferred = (items: BiliTrack[]) => [...items].sort((a, b) => Number(a.kind === 'asr') - Number(b.kind === 'asr'))[0];
   const english = preferred(tracks.filter(track => /^en(?:-|$)/i.test(track.language)));
-  const chineseRank = (track: BiliTrack) => {
-    const label = `${track.language} ${track.name}`;
-    if (/zh-Hans|简体/i.test(label)) return 0;
-    if (/zh-CN|中国/i.test(label)) return 1;
-    if (/zh-Hant|繁体/i.test(label)) return 2;
-    return 3;
-  };
   const chinese = [...tracks.filter(track => /^(?:zh|ai-zh)(?:-|$)/i.test(track.language))]
-    .sort((a, b) => chineseRank(a) - chineseRank(b) || Number(a.kind === 'asr') - Number(b.kind === 'asr'))[0];
+    .sort((a, b) => chineseTrackRank(a) - chineseTrackRank(b) || Number(a.kind === 'asr') - Number(b.kind === 'asr'))[0];
   if (english && chinese && !tracks.some(track => /双语|中英|bilingual/i.test(track.name))) {
     tracks.push({ id: `bili:dual:${tracks.indexOf(english)}:${tracks.indexOf(chinese)}`, name: `${english.name} + ${chinese.name}（网站双语）`.slice(0, 500),
       language: `${english.language}+${chinese.language}`, kind: english.kind === 'manual' && chinese.kind === 'manual' ? 'manual' : 'asr',
@@ -119,6 +120,19 @@ export function chooseBiliTrack(tracks: BiliTrack[]) {
     return (rank < 0 ? 20 : rank + 1) + (track.kind === 'asr' ? .5 : 0);
   };
   return [...tracks].sort((a, b) => preference(a) - preference(b))[0];
+}
+
+export function chooseBiliPair(tracks: BiliTrack[]) {
+  const single = tracks.filter(track => !track.secondary);
+  const bilingual = single.find(track => /双语|中英|bilingual/i.test(track.name));
+  if (bilingual) return { primary: bilingual, secondary: undefined };
+  const manualFirst = (items: BiliTrack[]) => [...items].sort((a, b) => Number(a.kind === 'asr') - Number(b.kind === 'asr'))[0];
+  const english = manualFirst(single.filter(track => /^en(?:-|$)/i.test(track.language)));
+  const chinese = [...single.filter(track => /^(?:zh|ai-zh)(?:-|$)/i.test(track.language))]
+    .sort((a, b) => chineseTrackRank(a) - chineseTrackRank(b) || Number(a.kind === 'asr') - Number(b.kind === 'asr'))[0];
+  const primary = english ?? chooseBiliTrack(single);
+  const secondary = primary && chinese && chinese.id !== primary.id ? chinese : undefined;
+  return { primary, secondary };
 }
 async function fetchBiliCues(url: string, trackId: string, signal?: AbortSignal): Promise<RawCue[]> {
   const response = await fetch(url, { credentials: 'omit', signal, redirect: 'error', cache: 'no-store', headers: { Accept: 'application/json' } });

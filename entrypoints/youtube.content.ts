@@ -1,5 +1,5 @@
 import { parseJson3, parseJson3WordTimings, record, watchVideoId } from '../lib/captions';
-import { CHANNEL, PORT, emptyState, isPlaybackRate, isVideoInfo, type State } from '../lib/protocol';
+import { CHANNEL, PORT, emptyState, followPauseMs, isPlaybackRate, isVideoInfo, type PlayMode, type State } from '../lib/protocol';
 import { SessionGate } from '../lib/session';
 import { parseSupadata, validLanguage } from '../lib/supadata';
 import { buildEstimatedTimedPhrases, buildTimedPhrases } from '../lib/timed-phrases';
@@ -7,8 +7,9 @@ import { buildEstimatedTimedPhrases, buildTimedPhrases } from '../lib/timed-phra
 export default defineContentScript({
   matches: ['https://www.youtube.com/*'], runAt: 'document_start',
   main(ctx) {
-    type PlayMode = 'single' | 'loop' | 'all';
-    type ActivePlayback = { owner: Browser.runtime.Port; startMs: number; endMs: number; mode: PlayMode; generation: number; looping: boolean };
+    type Boundary = { startMs: number; endMs: number };
+    type ActivePlayback = { owner: Browser.runtime.Port; startMs: number; endMs: number; mode: PlayMode; generation: number;
+      looping: boolean; waiting: boolean; queue: Boundary[] };
     const clients = new Set<Browser.runtime.Port>();
     const gate = new SessionGate();
     let state: State = emptyState();
@@ -79,7 +80,8 @@ export default defineContentScript({
             state = { ...state, video: v }; publish(); return;
           }
           gate.next();
-          state = { ...emptyState(), video: v, trackId: v.tracks[0]?.id ?? null, status: 'ready',
+          state = { ...emptyState(), video: v, trackId: v.tracks[0]?.id ?? null, primaryTrackId: v.tracks[0]?.id,
+            secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', status: 'ready',
             message: '视频已连接，正在准备字幕。' };
           publish();
         }
@@ -92,7 +94,9 @@ export default defineContentScript({
       if (!video || !video.tracks.some(t => t.id === trackId) || state.status === 'loading') return;
       const token = gate.next();
       clearPlaybackBoundary();
-      state = { ...state, source: 'youtube', language: video.tracks.find(t => t.id === trackId)?.language, trackId, status: 'loading', message: '正在请求网站原始字幕…', cues: [], eventCount: 0, controlEventCount: 0 }; publish();
+      state = { ...state, source: 'youtube', language: video.tracks.find(t => t.id === trackId)?.language, trackId,
+        primaryTrackId: trackId, secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', status: 'loading',
+        message: '正在请求网站原始字幕…', cues: [], eventCount: 0, controlEventCount: 0 }; publish();
       try {
         const r = await request('load', { videoId: video.videoId, session: video.session, trackId });
         if (!gate.current(token) || watchVideoId(location.href) !== video.videoId) return;
@@ -129,11 +133,16 @@ export default defineContentScript({
         const video = document.querySelector<HTMLVideoElement>('#movie_player video.html5-main-video');
         if (!video || video.readyState === 0 || !Number.isFinite(video.duration)) throw new Error('播放器尚未准备好定位');
         if (targetMs / 1000 >= video.duration) throw new Error('条目时间超出当前视频，未执行定位');
-        const mode: PlayMode = message.playMode === 'loop' || message.playMode === 'all' ? message.playMode : 'single';
+        const mode: PlayMode = message.playMode === 'loop' || message.playMode === 'all' || message.playMode === 'follow' ? message.playMode : 'single';
         const boundedEnd = typeof endMs === 'number' ? Math.min(endMs, video.duration * 1000) : endMs;
         const playbackToken = ++playbackGeneration;
         if (typeof boundedEnd === 'number' && boundedEnd > targetMs) {
-          activePlayback = { owner: port, startMs: targetMs, endMs: boundedEnd, mode, generation: playbackToken, looping: false };
+          const rows = phrase ? state.phrases ?? [] : state.cues;
+          const rowIndex = rows.findIndex(item => item === (phrase ?? cue));
+          const queue = rows.slice(rowIndex + 1).flatMap(item => item.startMs !== null && item.endMs !== null && item.endMs > item.startMs
+            ? [{ startMs: item.startMs, endMs: Math.min(item.endMs, video.duration * 1000) }] : []);
+          activePlayback = { owner: port, startMs: targetMs, endMs: boundedEnd, mode, generation: playbackToken,
+            looping: false, waiting: false, queue };
         } else {
           activePlayback = null;
         }
@@ -184,15 +193,26 @@ export default defineContentScript({
       if (!video || video.readyState === 0) return;
       try {
         if (message.type === 'playback-toggle') {
-          if (video.paused) await video.play(); else video.pause();
+          if (activePlayback?.owner === port && activePlayback.mode === 'follow' && activePlayback.waiting) {
+            const next = activePlayback.queue[0];
+            if (!next) clearPlaybackBoundary();
+            else {
+              activePlayback = { ...activePlayback, ...next, queue: activePlayback.queue.slice(1), waiting: false,
+                generation: ++playbackGeneration };
+              video.currentTime = next.startMs / 1000; await video.play();
+            }
+          } else if (video.paused) await video.play(); else video.pause();
         }
         if (message.type === 'playback-rate' && isPlaybackRate(message.rate)) video.playbackRate = message.rate;
-        if (message.type === 'playback-mode' && (message.mode === 'single' || message.mode === 'loop' || message.mode === 'all')) {
+        if (message.type === 'playback-mode' && (message.mode === 'single' || message.mode === 'loop' || message.mode === 'all' || message.mode === 'follow')) {
           if (activePlayback?.owner === port) {
             const previous = activePlayback;
-            if (video.currentTime * 1000 >= previous.endMs) clearPlaybackBoundary();
+            if (previous.waiting && message.mode === 'all') {
+              clearPlaybackBoundary();
+              await video.play();
+            } else if (video.currentTime * 1000 >= previous.endMs) clearPlaybackBoundary();
             else {
-              activePlayback = { ...previous, mode: message.mode, looping: false, generation: ++playbackGeneration };
+              activePlayback = { ...previous, mode: message.mode, looping: false, waiting: false, generation: ++playbackGeneration };
               if (previous.looping && message.mode === 'all' && video.paused) await video.play();
             }
           }
@@ -211,7 +231,9 @@ export default defineContentScript({
         if (m.type === 'refresh') { reset(); void refresh(); }
         if (m.type === 'supadata-begin' && state.status !== 'loading' && state.video && m.session === state.video.session
           && m.videoId === state.video.videoId && typeof m.requestId === 'string' && /^[\w-]{1,100}$/.test(m.requestId)) {
-          gate.next(); clearPlaybackBoundary(); state = { ...state, source: 'supadata', trackId: `supadata:${m.requestId}`, status: 'loading', cues: [],
+          gate.next(); clearPlaybackBoundary(); state = { ...state, source: 'supadata', trackId: `supadata:${m.requestId}`,
+            primaryTrackId: typeof m.requestedTrackId === 'string' ? m.requestedTrackId : state.primaryTrackId,
+            secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', status: 'loading', cues: [],
             eventCount: 0, controlEventCount: 0, message: '正在通过 Supadata 获取已有字幕（会使用服务额度）…' }; publish();
         }
         if (m.type === 'supadata-finish' && state.video && m.session === state.video.session && m.videoId === state.video.videoId
@@ -227,10 +249,33 @@ export default defineContentScript({
           } catch (error) { state = { ...state, status: 'error', message: (error as Error).message }; }
           publish();
         }
+        if (m.type === 'supadata-secondary-begin' && state.video && state.status === 'loaded' && m.session === state.video.session
+          && m.videoId === state.video.videoId && typeof m.requestId === 'string' && /^[\w-]{1,100}$/.test(m.requestId)
+          && typeof m.requestedTrackId === 'string' && state.video.tracks.some(track => track.id === m.requestedTrackId)) {
+          state = { ...state, secondaryTrackId: m.requestedTrackId, secondaryCues: [], secondaryStatus: 'loading',
+            secondaryMessage: '正在通过 Supadata 获取第二字幕（会使用一次服务额度）…' }; publish();
+        }
+        if (m.type === 'supadata-secondary-finish' && state.video && state.status === 'loaded' && m.session === state.video.session
+          && m.videoId === state.video.videoId && state.secondaryStatus === 'loading' && state.secondaryTrackId === m.requestedTrackId) {
+          try {
+            if (typeof m.error === 'string') throw new Error(m.error.slice(0, 500));
+            const parsed = parseSupadata(m.data);
+            state = { ...state, secondaryCues: parsed.cues, secondaryLanguage: parsed.language, secondaryStatus: 'loaded',
+              secondaryMessage: `第二字幕已就绪：${parsed.cues.length} 条，实际语言 ${parsed.language}` };
+          } catch (error) {
+            state = { ...state, secondaryCues: [], secondaryStatus: 'error', secondaryMessage: (error as Error).message };
+          }
+          publish();
+        }
+        if (m.type === 'secondary-clear' && state.video && m.session === state.video.session && m.videoId === state.video.videoId) {
+          state = { ...state, secondaryTrackId: null, secondaryCues: [], secondaryLanguage: undefined,
+            secondaryStatus: 'idle', secondaryMessage: '' }; publish();
+        }
         if (m.type === 'timing-load') void loadWordTiming(m, port);
         if (m.type === 'select' && typeof m.trackId === 'string' && m.session === state.video?.session
           && state.status !== 'loading' && state.video?.tracks.some(t => t.id === m.trackId)) {
-          gate.next(); clearPlaybackBoundary(); state = { ...state, source: 'youtube', trackId: m.trackId, cues: [], eventCount: 0, controlEventCount: 0,
+          gate.next(); clearPlaybackBoundary(); state = { ...state, source: 'youtube', trackId: m.trackId, primaryTrackId: m.trackId,
+            secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', cues: [], eventCount: 0, controlEventCount: 0,
             status: 'ready', message: '字幕轨已切换，正在准备字幕' }; publish();
         }
         if (m.type === 'load' && typeof m.trackId === 'string' && m.session === state.video?.session) void load(m.trackId);
@@ -252,10 +297,36 @@ export default defineContentScript({
     ctx.setInterval(publishPlayback, 250);
     ctx.setInterval(() => {
       const active = activePlayback;
-      if (!active || active.mode === 'all' || active.looping || !clients.has(active.owner)) return;
+      if (!active || active.mode === 'all' || active.looping || active.waiting || !clients.has(active.owner)) return;
       const video = document.querySelector<HTMLVideoElement>('#movie_player video.html5-main-video');
       if (!video || video.readyState === 0 || video.paused || video.currentTime * 1000 < active.endMs) return;
       video.pause();
+      if (active.mode === 'follow') {
+        active.waiting = true; publishPlayback();
+        const generation = active.generation;
+        setTimeout(() => {
+          const latest = activePlayback;
+          if (!latest || latest.generation !== generation || latest.mode !== 'follow' || !latest.waiting || !clients.has(latest.owner)) return;
+          const next = latest.queue[0];
+          if (!next) {
+            const owner = latest.owner; clearPlaybackBoundary();
+            if (clients.has(owner) && state.video) try { owner.postMessage({ type: 'playback', message: '逐句跟读已完成最后一句',
+              videoId: state.video.videoId, session: state.video.session, trackId: state.trackId }); } catch { /* disconnected */ }
+            return;
+          }
+          const nextGeneration = ++playbackGeneration;
+          activePlayback = { ...latest, ...next, queue: latest.queue.slice(1), generation: nextGeneration, waiting: false };
+          video.currentTime = next.startMs / 1000;
+          void video.play().catch(() => {
+            const failed = activePlayback;
+            if (!failed || failed.generation !== nextGeneration) return;
+            const owner = failed.owner; clearPlaybackBoundary();
+            if (clients.has(owner) && state.video) try { owner.postMessage({ type: 'playback', message: '逐句跟读恢复播放被浏览器拦截，已停止',
+              videoId: state.video.videoId, session: state.video.session, trackId: state.trackId }); } catch { /* disconnected */ }
+          });
+        }, followPauseMs(active.startMs, active.endMs));
+        return;
+      }
       video.currentTime = active.startMs / 1000;
       if (active.mode === 'single') { publishPlayback(); return; }
       active.looping = true;

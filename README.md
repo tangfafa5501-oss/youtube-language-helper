@@ -6,11 +6,13 @@
 
 - YouTube：Supadata native 标点字幕优先与 YouTube 自动轨词级时间对齐；对齐不可用时按 Supadata cue 时间生成明确标记为估算的可点击语段。
 - Bilibili：读取网站官方 WBI 字幕轨，复用网页登录态；不调用 Supadata。
-- 网站双语：B站已有单条双语轨时直接使用；若网站提供英语主轨和中文副轨，则按真实 cue 时间组合为“网站双语”，不自行翻译。多个中文候选同时存在时优先网站的简体中文轨。
+- 双字幕：侧栏顶部独立选择主字幕和第二字幕。B站并发读取网站提供的两条真实轨道；YouTube 第二轨只在用户明确选择后额外请求一次。第二字幕按真实时间覆盖显示，不改变主字幕的分句、起止时间或点击定位。
+- 网站双语：B站已有单条双语轨时直接使用；若网站提供英语主轨和中文副轨，则分别保留两条轨道，不自行翻译。多个中文候选同时存在时优先网站的手工简体中文轨。
 - 本地分句：SBD 1.0.19 先固定句号、问号和感叹号边界，再用本地语义规则处理缺标点或过长句。语音停顿不参与断句；不足 2 秒连续向后合并，6 秒是建议目标，完整自然句可适度超过，安全上限为 10 秒。原始字幕文字、顺序和 cue 数据不改。
-- 播放：点击定位、上一句、下一句、单句播放、500 ms 间隔循环、连续播放、0.75/0.8/0.9/1 倍速、播放中高亮，以及 `Space/K/Shift+<>/E/H/A/S/D` 快捷键。
-- 跟读：本地麦克风录音与回放，支持 `R/G/Esc`；没有语音评分或云端上传。
+- 播放：点击定位、上一句、下一句、连续播放、逐句跟读、0.5/1/1.5/2 倍速、播放中高亮，以及 `Space/K/Shift+<>/E/A/S/D` 快捷键。逐句跟读在每句结束后按本句时长暂停，再自动播放下一句；暂停期间点击播放会立即进入下一句。
+- 预留功能：书本按钮保留给听写，麦克风按钮保留给录音与评分；当前点击会明确提示尚未开放，不会申请麦克风或伪装成已实现。
 - 工作流：保存 Key 后，每个新 YouTube 视频会话自动读取一次字幕；三点菜单可显式重新获取、打开引导或设置。B站自动读取网站字幕且不调用 Supadata。
+- 设置：外观、自然语段/原始字幕、Supadata Key 与语言均在侧栏内管理；支持跟随系统、浅色和深色主题。AI 提供商区域仅如实显示“尚未启用”。
 
 不包含 Netflix、无字幕语音识别、新翻译服务、AI 评分、Enjoy 账号同步或商店发布。
 
@@ -22,7 +24,7 @@ B站双语组合以英语为上行、中文为下行。分段不同的两轨按�
 
 ## Supadata 设置
 
-YouTube 字幕使用用户自己的 Supadata Key。打开扩展选项页，保存 Key 与语言代码并执行账户测试。Key 只保存在 `chrome.storage.local`；每个新视频会话自动提交一次，之后只有用户从三点菜单选择“重新获取字幕”才会再次提交。固定使用 `mode=native`、`text=false`，异步任务最多轮询 60 次。
+YouTube 字幕使用用户自己的 Supadata Key。可从侧栏三点菜单进入设置，保存 Key 与语言代码并执行账户测试。Key 只保存在 `chrome.storage.local`；每个新视频会话自动提交一次主字幕，之后只有用户选择第二字幕或从三点菜单选择“重新获取字幕”才会再次提交。固定使用 `mode=native`、`text=false`，异步任务最多轮询 60 次。
 
 B站不使用 Supadata Key，也不产生 Supadata 调用次数。
 
@@ -48,15 +50,15 @@ D:\github\youtube-language-helper\.output\chrome-mv3
 
 ## 当前验证结果
 
-- 109/109 单元检查通过。
-- 56/56 生产 bundle 集成检查通过。
+- 113/113 单元检查通过。
+- 60/60 生产 bundle 集成检查通过。
 - TypeScript 类型检查和 Chrome MV3 生产构建通过。
 - 真实 21 分钟数据离线联合回放：275 条 Supadata 标点 cue + 2146 个 YouTube 词时间生成 253 段；全部为 2.000–8.520 秒，无倒退、无相邻重叠，前/中/20分钟后三处及用户指出的六个句界均通过。它验证真实数据管线，不等于本轮磁盘构建已在 Chrome 中重载。
 - 此前已安装生产版本验证过 YouTube 前、中、20分钟后定位、单句/循环/连续、倍速和同视频双标签页隔离；本轮生产脚本继续通过相同协议及 SPA A→B→A 的受控模拟。
 - B站生产 bundle 已验证页面登录桥、网站双语、快速切轨、单句/循环/连续、SPA 切换、多标签页隔离，以及 20 分钟后时间边界。
 - B站真实登录 Chrome 已加载此前提交 `b75bb75` 的生产包：网站语言下拉、双语字幕、点击定位、单句/循环/连续、0.8×、上/下一句、同视频双标签页和第 1 P→第 2 P→第 1 P 状态重建均通过。真实样本每个分 P 不足 5 分钟，因此 B站 20 分钟轴仍明确标记为模拟；整体 ≥20 分钟真实定位由 YouTube 21 分钟样本覆盖。
 
-本轮最新生产包另以真实 JS/CSS 加模拟 Port/数据完成浏览器交互和窄侧栏验收；这不等于 Chrome 已重新加载最新版，也不等于真实 Supadata 调用。116 项有效改进及逐项证据见 [改进台账](docs/improvement-ledger.md)。
+本轮最新生产包另以真实 JS/CSS 加受控 Port/字幕数据完成 Chrome 测试浏览器验收：两个字幕菜单、快捷键、三点菜单、引导、侧栏设置、明暗主题、倍速、逐句跟读、预留按钮和 320px 窄侧栏全部通过，控制台无 error/warn。证据见 [设计验收](design-qa.md)；它不等于 Chrome 已重新加载最新版，也不等于真实 Supadata 调用。121 项有效改进及逐项证据见 [改进台账](docs/improvement-ledger.md)。
 
 自动化中的 B站官方响应为受控模拟，不能替代登录态真实网页验收。完整边界见 [M0 验证记录](docs/m0-validation.md)。
 
@@ -66,8 +68,8 @@ D:\github\youtube-language-helper\.output\chrome-mv3
 - `entrypoints/youtube.content.ts`：YouTube 状态、定位和播放边界。
 - `entrypoints/bilibili-main.content.ts`：复用 B站网页登录态获取元数据与字幕轨。
 - `entrypoints/bilibili.content.ts`：B站字幕解析、切轨、定位和播放边界。
-- `entrypoints/sidepanel/`：Enjoy 式侧栏、字幕与播放/录音控件。
-- `entrypoints/options/`：Supadata 设置。
+- `entrypoints/sidepanel/`：Enjoy 式双字幕侧栏、播放、快捷键和侧栏设置入口。
+- `components/settings-view.tsx`：侧栏与独立选项页共用的外观和 Supadata 设置。
 - `lib/bilibili.ts`：B站轨道、网站双语和 cue 时间处理。
 - `tests/integration/`：针对生产构建脚本的受控集成验证。
 
@@ -76,5 +78,6 @@ D:\github\youtube-language-helper\.output\chrome-mv3
 - SBD 1.0.19：MIT，见 `public/licenses/sbd.txt`。
 - YouTube Digest 字幕链路移植：MIT，见 `public/licenses/youtube-digest.txt`。
 - Bilibili Digest WBI/字幕链路移植：MIT，见 `public/licenses/bilibili-digest.txt`。
+- Radix UI：MIT；用于 Select、Dropdown Menu、Dialog、Popover 和 Slider 的可访问交互基础。
 
-本仓库没有远程仓库；已有本地提交，未推送、未发布。继续工作前先读 [HANDOFF.md](HANDOFF.md)、[设计稿](docs/design.md) 和 [M0 验证记录](docs/m0-validation.md)。
+本仓库远程为 `origin`；是否已推送以 `git status` 和远程分支为准，不能把本地提交称为已推送。继续工作前先读 [HANDOFF.md](HANDOFF.md)、[设计稿](docs/design.md) 和 [M0 验证记录](docs/m0-validation.md)。

@@ -1,16 +1,17 @@
-import { biliCues, biliMetadata, biliPhrases, biliTracks, biliVideo, chooseBiliTrack, isBiliTrack, type BiliTrack } from '../lib/bilibili';
-import { PORT, emptyState, isPlaybackRate, type State, type Track } from '../lib/protocol';
+import { biliCues, biliMetadata, biliPhrases, biliTracks, biliVideo, chooseBiliPair, isBiliTrack, type BiliTrack } from '../lib/bilibili';
+import { PORT, emptyState, followPauseMs, isPlaybackRate, type PlayMode, type State, type Track } from '../lib/protocol';
 import { record } from '../lib/captions';
 
 export default defineContentScript({
   matches: ['https://www.bilibili.com/video/*', 'https://www.bilibili.com/list/*'], runAt: 'document_idle',
   main(ctx) {
     const BILI_CHANNEL = 'ylh-bilibili-page-v1';
-    type Mode = 'single' | 'loop' | 'all';
+    type Boundary = { startMs: number; endMs: number };
     const clients = new Set<Browser.runtime.Port>();
     const urls = new Map<string, BiliTrack>();
     let state: State = emptyState(), locationKey = '', loadingKey = '', settledKey = '', refreshGeneration = 0, controller: AbortController | null = null;
-    let active: { owner: Browser.runtime.Port; startMs: number; endMs: number; mode: Mode; generation: number; looping: boolean } | null = null;
+    let active: { owner: Browser.runtime.Port; startMs: number; endMs: number; mode: PlayMode; generation: number;
+      looping: boolean; waiting: boolean; queue: Boundary[] } | null = null;
     let generation = 0;
     async function pageMetadataTracks(current: { bvid: string; page: number }) {
       const requestId = crypto.randomUUID();
@@ -53,20 +54,28 @@ export default defineContentScript({
       controller?.abort(); controller = null; active = null; generation++; urls.clear();
       state = { ...emptyState(), message }; publish();
     };
-    async function loadTrack(track: BiliTrack, session: string) {
+    async function loadTracks(primary: BiliTrack, secondary: BiliTrack | undefined, session: string) {
       if (state.video?.session !== session) return;
       controller?.abort(); const request = new AbortController(); controller = request;
       active = null; generation++;
-      state = { ...state, status: 'loading', trackId: track.id, source: 'bilibili', language: track.language, cues: [], phrases: [], message: `正在读取 B 站 ${track.name}…` }; publish();
+      state = { ...state, status: 'loading', trackId: primary.id, primaryTrackId: primary.id, secondaryTrackId: secondary?.id ?? null,
+        secondaryStatus: secondary ? 'loading' : 'idle', secondaryMessage: secondary ? `正在读取 ${secondary.name}` : '',
+        source: 'bilibili', language: primary.language, secondaryLanguage: secondary?.language,
+        cues: [], secondaryCues: [], phrases: [], message: `正在读取 B 站 ${primary.name}…` }; publish();
       try {
-        const cues = await biliCues(track, request.signal), phrases = biliPhrases(cues);
+        const [cues, secondaryCues] = await Promise.all([
+          biliCues(primary, request.signal), secondary ? biliCues(secondary, request.signal) : Promise.resolve([]),
+        ]);
+        const phrases = biliPhrases(cues);
         if (request.signal.aborted || state.video?.session !== session) return;
-        state = { ...state, status: 'loaded', cues, phrases, eventCount: cues.length, controlEventCount: 0,
+        state = { ...state, status: 'loaded', cues, secondaryCues, phrases, eventCount: cues.length, controlEventCount: 0,
+          secondaryStatus: secondary ? 'loaded' : 'idle', secondaryMessage: secondary ? `${secondary.name} 已就绪` : '',
           message: `B 站字幕已就绪：${cues.length} 条原始字幕，${phrases.length} 个可定位语段`,
           timingMessage: '使用 B 站原始 from/to 时间；句界在单条字幕内时不伪造新起点。' }; publish();
       } catch (error) {
         if (!request.signal.aborted && state.video?.session === session) {
-          state = { ...state, status: 'error', cues: [], phrases: [], message: error instanceof Error ? error.message : 'B 站字幕读取失败' }; publish();
+          state = { ...state, status: 'error', cues: [], secondaryCues: [], phrases: [], secondaryStatus: 'error',
+            message: error instanceof Error ? error.message : 'B 站字幕读取失败' }; publish();
         }
       } finally { if (controller === request) controller = null; }
     }
@@ -84,15 +93,18 @@ export default defineContentScript({
         const info = pageResult?.metadata ?? await biliMetadata(current.bvid, current.page, request.signal);
         const { tracks, needLogin } = pageResult ?? await biliTracks(current.bvid, info.aid, info.cid, request.signal);
         if (request.signal.aborted || locationKey !== nextKey || refreshToken !== refreshGeneration) return;
-        urls.clear(); for (const track of tracks) urls.set(track.id, track);
-        const publicTracks: Track[] = tracks.map(track => ({ id: track.id, name: track.name, language: track.language, kind: track.kind,
+        const selectableTracks = tracks.filter(track => !track.secondary);
+        urls.clear(); for (const track of selectableTracks) urls.set(track.id, track);
+        const publicTracks: Track[] = selectableTracks.map(track => ({ id: track.id, name: track.name, language: track.language, kind: track.kind,
           fingerprint: JSON.stringify([track.id, track.name, track.language, track.kind]) }));
+        const selected = chooseBiliPair(selectableTracks);
         state = { ...emptyState(), video: { videoId: current.bvid, title: info.title || document.title, session, tracks: publicTracks,
-          availability: tracks.length ? '' : needLogin ? 'B 站字幕需要登录后读取' : '当前 B 站视频没有可读取的官方字幕轨', platform: 'bilibili' },
-          status: tracks.length ? 'ready' : 'error', message: tracks.length ? '已发现 B 站字幕轨' : needLogin ? '请先在 B 站登录，再刷新视频读取字幕' : '当前视频没有可读取的官方字幕轨',
-          trackId: chooseBiliTrack(tracks)?.id ?? null, cues: [], eventCount: 0, controlEventCount: 0 };
+          availability: selectableTracks.length ? '' : needLogin ? 'B 站字幕需要登录后读取' : '当前 B 站视频没有可读取的官方字幕轨', platform: 'bilibili' },
+          status: selectableTracks.length ? 'ready' : 'error', message: selectableTracks.length ? '已发现 B 站字幕轨' : needLogin ? '请先在 B 站登录，再刷新视频读取字幕' : '当前视频没有可读取的官方字幕轨',
+          trackId: selected.primary?.id ?? null, primaryTrackId: selected.primary?.id, secondaryTrackId: selected.secondary?.id ?? null,
+          secondaryStatus: selected.secondary ? 'loading' : 'idle', cues: [], secondaryCues: [], eventCount: 0, controlEventCount: 0 };
         settledKey = nextKey;
-        publish(); const selected = chooseBiliTrack(tracks); if (selected) await loadTrack(selected, session);
+        publish(); if (selected.primary) await loadTracks(selected.primary, selected.secondary, session);
       } catch (error) {
         if (locationKey === nextKey && refreshToken === refreshGeneration) {
           settledKey = nextKey;
@@ -115,10 +127,15 @@ export default defineContentScript({
           videoId: info.videoId, session: info.session, trackId: state.trackId }); } catch { /* disconnected */ }
         return;
       }
-      const mode: Mode = message.playMode === 'loop' || message.playMode === 'all' ? message.playMode : 'single';
+      const mode: PlayMode = message.playMode === 'loop' || message.playMode === 'all' || message.playMode === 'follow' ? message.playMode : 'single';
       const boundedEnd = typeof endMs === 'number' ? Math.min(endMs, video.duration * 1000) : endMs;
       const token = ++generation;
-      active = typeof boundedEnd === 'number' && boundedEnd > startMs ? { owner: port, startMs, endMs: boundedEnd, mode, generation: token, looping: false } : null;
+      const rows = phrase ? state.phrases ?? [] : state.cues;
+      const rowIndex = rows.findIndex(item => item === (phrase ?? cue));
+      const queue = rows.slice(rowIndex + 1).flatMap(item => item.startMs !== null && item.endMs !== null && item.endMs > item.startMs
+        ? [{ startMs: item.startMs, endMs: Math.min(item.endMs, video.duration * 1000) }] : []);
+      active = typeof boundedEnd === 'number' && boundedEnd > startMs
+        ? { owner: port, startMs, endMs: boundedEnd, mode, generation: token, looping: false, waiting: false, queue } : null;
       video.currentTime = startMs / 1000;
       const report = (text: string) => { if (clients.has(port)) try { port.postMessage({ type: 'playback', message: text,
         videoId: info.videoId, session: info.session, trackId: state.trackId }); } catch { /* disconnected */ } };
@@ -135,13 +152,24 @@ export default defineContentScript({
       if (!binding || !clients.has(port) || !video || video.readyState === 0 || !current || `${current.bvid}:p${current.page}` !== settledKey
         || message.videoId !== binding.videoId || message.session !== binding.session || message.trackId !== state.trackId) return;
       try {
-        if (message.type === 'playback-toggle') { if (video.paused) await video.play(); else video.pause(); }
+        if (message.type === 'playback-toggle') {
+          if (active?.owner === port && active.mode === 'follow' && active.waiting) {
+            const next = active.queue[0];
+            if (!next) { active = null; generation++; }
+            else {
+              active = { ...active, ...next, queue: active.queue.slice(1), waiting: false, generation: ++generation };
+              video.currentTime = next.startMs / 1000; await video.play();
+            }
+          } else if (video.paused) await video.play(); else video.pause();
+        }
         if (message.type === 'playback-rate' && isPlaybackRate(message.rate)) video.playbackRate = message.rate;
-        if (message.type === 'playback-mode' && (message.mode === 'single' || message.mode === 'loop' || message.mode === 'all') && active?.owner === port) {
+        if (message.type === 'playback-mode' && (message.mode === 'single' || message.mode === 'loop' || message.mode === 'all' || message.mode === 'follow') && active?.owner === port) {
           const previous = active;
-          if (video.currentTime * 1000 >= previous.endMs) { active = null; generation++; }
+          if (previous.waiting && message.mode === 'all') {
+            active = null; generation++; await video.play();
+          } else if (video.currentTime * 1000 >= previous.endMs) { active = null; generation++; }
           else {
-            active = { ...previous, mode: message.mode, generation: ++generation, looping: false };
+            active = { ...previous, mode: message.mode, generation: ++generation, looping: false, waiting: false };
             if (previous.looping && message.mode === 'all' && video.paused) await video.play();
           }
         }
@@ -156,7 +184,10 @@ export default defineContentScript({
         if (message.type === 'refresh') { settledKey = ''; void refresh(true); return; }
         if (message.type === 'seek') void seek(message, port);
         if (message.type === 'bilibili-select' && typeof message.trackId === 'string' && message.session === state.video?.session) {
-          const track = urls.get(message.trackId); if (track) void loadTrack(track, state.video!.session);
+          const primary = urls.get(message.trackId);
+          const secondary = typeof message.secondaryTrackId === 'string' && message.secondaryTrackId !== message.trackId
+            ? urls.get(message.secondaryTrackId) : undefined;
+          if (primary) void loadTracks(primary, secondary, state.video!.session);
         }
         if (message.type === 'playback-toggle' || message.type === 'playback-rate' || message.type === 'playback-mode') void control(message, port);
       });
@@ -166,8 +197,35 @@ export default defineContentScript({
     ctx.setInterval(playback, 250);
     ctx.setInterval(() => {
       const item = active, video = videoElement();
-      if (!item || !video || item.mode === 'all' || item.looping || video.paused || video.currentTime * 1000 < item.endMs) return;
-      video.pause(); video.currentTime = item.startMs / 1000;
+      if (!item || !video || item.mode === 'all' || item.looping || item.waiting || video.paused || video.currentTime * 1000 < item.endMs) return;
+      video.pause();
+      if (item.mode === 'follow') {
+        item.waiting = true; playback();
+        const token = item.generation;
+        setTimeout(() => {
+          const latest = active;
+          if (!latest || latest.generation !== token || latest.mode !== 'follow' || !latest.waiting || !clients.has(latest.owner)) return;
+          const next = latest.queue[0];
+          if (!next) {
+            const owner = latest.owner; active = null; generation++;
+            if (clients.has(owner) && state.video) try { owner.postMessage({ type: 'playback', message: '逐句跟读已完成最后一句',
+              videoId: state.video.videoId, session: state.video.session, trackId: state.trackId }); } catch { /* disconnected */ }
+            return;
+          }
+          const nextGeneration = ++generation;
+          active = { ...latest, ...next, queue: latest.queue.slice(1), generation: nextGeneration, waiting: false };
+          video.currentTime = next.startMs / 1000;
+          void video.play().catch(() => {
+            const failed = active;
+            if (!failed || failed.generation !== nextGeneration) return;
+            const owner = failed.owner; active = null; generation++;
+            if (clients.has(owner) && state.video) try { owner.postMessage({ type: 'playback', message: '逐句跟读恢复播放被浏览器拦截，已停止',
+              videoId: state.video.videoId, session: state.video.session, trackId: state.trackId }); } catch { /* disconnected */ }
+          });
+        }, followPauseMs(item.startMs, item.endMs));
+        return;
+      }
+      video.currentTime = item.startMs / 1000;
       if (item.mode === 'single') { playback(); return; }
       item.looping = true; const token = item.generation;
       setTimeout(() => {

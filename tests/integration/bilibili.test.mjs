@@ -85,12 +85,16 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
   return { state, send, sendRaw, video, messages, requests, location, disconnect: port.disconnect };
 }
 
-test('production Bilibili page bridge reuses the website session and combines its existing primary/secondary tracks', async t => {
+test('production Bilibili page bridge keeps website primary and secondary tracks independent', async t => {
   const h = await harness(t, { withMain: true, separateTracks: true });
   assert.equal(h.state().status, 'loaded');
-  assert.equal(h.state().language, 'en-US+zh-Hans');
-  assert.equal(h.state().cues[0].text, 'Hello students. Second line.\n同学们好。第二句。');
-  assert.deepEqual([h.state().cues[0].startMs, h.state().cues[0].endMs], [1000, 7000]);
+  assert.equal(h.state().language, 'en-US');
+  assert.equal(h.state().secondaryLanguage, 'zh-Hans');
+  assert.equal(h.state().cues[0].text, 'Hello students.');
+  assert.equal(h.state().secondaryCues[0].text, '同学们好。第二句。');
+  assert.deepEqual([h.state().cues[0].startMs, h.state().cues[0].endMs], [1000, 4000]);
+  assert.equal(h.state().primaryTrackId, h.state().video.tracks.find(track => track.language === 'en-US').id);
+  assert.equal(h.state().secondaryTrackId, h.state().video.tracks.find(track => track.language === 'zh-Hans').id);
   assert.equal(h.requests.filter(url => url.includes('/x/web-interface/view')).length, 0);
   assert.equal(h.requests.filter(url => url.includes('/x/player/wbi/v2')).length, 1);
 });
@@ -156,6 +160,17 @@ test('production Bilibili bridge seeks and enforces single segment playback', as
   await sleep(20); assert.equal(h.video.currentTime, phrase.startMs / 1000); assert.equal(h.video.paused, false);
   h.video.currentTime = phrase.endMs / 1000 + .03; await sleep(100);
   assert.equal(h.video.paused, true); assert.equal(h.video.currentTime, phrase.startMs / 1000);
+});
+
+test('Bilibili follow mode pauses at a sentence end and playback resumes immediately with the next sentence', async t => {
+  const h = await harness(t), [first, second] = h.state().phrases;
+  assert.ok(first && second);
+  h.send({ type: 'seek', phraseId: first.id, playMode: 'follow' });
+  await sleep(20); h.video.currentTime = first.endMs / 1000; await sleep(100);
+  assert.equal(h.video.paused, true);
+  h.send({ type: 'playback-toggle' }); await sleep(30);
+  assert.equal(h.video.currentTime, second.startMs / 1000);
+  assert.equal(h.video.paused, false);
 });
 
 test('Bilibili playback controls reject a stale subtitle track binding', async t => {

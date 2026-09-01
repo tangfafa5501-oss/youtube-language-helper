@@ -28,6 +28,8 @@ async function harness(restrict = true, response = () => Response.json({ plan: '
 }
 test('production background saves, reports presence, and deletes a key without returning it or making network calls', async () => {
   const h = await harness();
+  assert.deepEqual((await h.send('settings')).settings,
+    { hasKey: false, language: 'en', theme: 'system', displayMode: 'phrases' });
   const saved = await h.send('save', { key: 'fixture-secret', language: 'en' });
   assert.equal(saved.settings.hasKey, true); assert.equal(JSON.stringify(saved).includes('fixture-secret'), false);
   const loaded = await h.send('settings'); assert.equal(loaded.settings.hasKey, true);
@@ -35,6 +37,17 @@ test('production background saves, reports presence, and deletes a key without r
   const deleted = await h.send('delete'); assert.equal(deleted.settings.hasKey, false);
   assert.equal(h.permissionRemoved, 1);
   assert.equal((await h.send('test')).ok, false); assert.equal(h.requests.length, 0);
+});
+
+test('side-panel appearance preferences persist without exposing or deleting the saved API key', async () => {
+  const h = await harness();
+  await h.send('save', { key: 'fixture-secret', language: 'en' });
+  const changed = await h.send('save-preferences', { theme: 'dark', displayMode: 'raw' }, 'chrome-extension://own/sidepanel.html');
+  assert.deepEqual(changed.settings, { hasKey: true, language: 'en', theme: 'dark', displayMode: 'raw' });
+  assert.equal(JSON.stringify(changed).includes('fixture-secret'), false);
+  const loaded = await h.send('settings', {}, 'chrome-extension://own/sidepanel.html');
+  assert.deepEqual(loaded.settings, changed.settings);
+  assert.equal(h.requests.length, 0);
 });
 
 test('saving trims the language and aborts work that still uses the previous settings', async () => {

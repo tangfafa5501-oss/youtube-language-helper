@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { biliCues, biliMetadata, biliPhrases, biliVideo, bvidToAid, chooseBiliTrack, isBiliTrack, pairBiliCues } from '../lib/bilibili.ts';
+import { biliCues, biliMetadata, biliPhrases, biliVideo, bvidToAid, chooseBiliPair, chooseBiliTrack, isBiliTrack, pairBiliCues } from '../lib/bilibili.ts';
 import { md5, signedPlayerUrl } from '../lib/bilibili-wbi.ts';
 import type { RawCue } from '../lib/captions.ts';
 
@@ -119,6 +119,17 @@ test('Bilibili chooses a website bilingual track first, then manual language tra
   ];
   assert.equal(chooseBiliTrack(tracks)?.id, 'both');
   assert.equal(chooseBiliTrack(tracks.slice(0, 2))?.id, 'zh-ai');
+});
+
+test('Bilibili exposes separate English and Chinese lanes when the website provides both', () => {
+  const tracks = [
+    { id: 'en', name: 'English', language: 'en-US', kind: 'manual' as const, url: 'https://x/en.json' },
+    { id: 'zh-cn', name: '中文（中国）', language: 'zh-CN', kind: 'manual' as const, url: 'https://x/zh-cn.json' },
+    { id: 'zh', name: '中文（简体）', language: 'zh-Hans', kind: 'manual' as const, url: 'https://x/zh.json' },
+  ];
+  assert.deepEqual(chooseBiliPair(tracks), { primary: tracks[0], secondary: tracks[2] });
+  const bilingual = { ...tracks[2], id: 'both', name: '中英双语' };
+  assert.deepEqual(chooseBiliPair([...tracks, bilingual]), { primary: bilingual, secondary: undefined });
 });
 
 test('Bilibili phrases preserve real cue boundaries and never invent an intra-cue timestamp', () => {

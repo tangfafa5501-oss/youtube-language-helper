@@ -1,6 +1,7 @@
-main { max-width: 820px; padding: 40px 24px; }
-.settings-card { margin: 20px 0; padding: 24px; border: 1px solid #d7e1dc; background: white; border-radius: 12px; }
-.settings-card p { font-size: 14px; }
-input { display: block; width: 100%; padding: 12px; border: 1px solid #becfc5; border-radius: 7px; font: inherit; }
-input:focus-visible { outline: 3px solid #f1b34d; outline-offset: 2px; }
-a { color: #245c48; }
+:root { font-family: Inter, ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: #f7f7f6; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+:root[data-theme="dark"] body { background: #090909; }
+@media (prefers-color-scheme: dark) { :root[data-theme="system"] body { background: #090909; } }

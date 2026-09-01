@@ -1,5 +1,7 @@
 export const SERVICE_CHANNEL = 'ylh-service-v1';
-export type PublicSettings = { hasKey: boolean; language: string };
+export type ThemeSetting = 'system' | 'light' | 'dark';
+export type DisplaySetting = 'phrases' | 'raw';
+export type PublicSettings = { hasKey: boolean; language: string; theme: ThemeSetting; displayMode: DisplaySetting };
 export type ServiceReply = { ok: boolean; error?: string; requestedLanguage?: string; settings?: PublicSettings;
   account?: { plan: string; maxCredits: number; usedCredits: number }; data?: unknown };
 

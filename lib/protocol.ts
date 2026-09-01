@@ -4,7 +4,7 @@ import type { TimedPhrase } from './timed-phrases.ts';
 export const CHANNEL = 'ylh-page-v1';
 export const PORT = 'ylh-panel-v1';
 // Keep the public player controls compatible with Enjoy's current media player.
-export const PLAYBACK_RATES = [.75, .8, .9, 1] as const;
+export const PLAYBACK_RATES = [.5, 1, 1.5, 2] as const;
 export function isPlaybackRate(value: unknown): value is (typeof PLAYBACK_RATES)[number] {
   return typeof value === 'number' && (PLAYBACK_RATES as readonly number[]).includes(value);
 }
@@ -13,6 +13,13 @@ export function adjacentPlaybackRate(current: number, direction: -1 | 1) {
   const index = (PLAYBACK_RATES as readonly number[]).indexOf(current);
   if (index < 0) return 1;
   return PLAYBACK_RATES[index + direction] ?? current;
+}
+
+export type PlayMode = 'single' | 'loop' | 'all' | 'follow';
+
+export function followPauseMs(startMs: number, endMs: number) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 2_000;
+  return Math.min(10_000, Math.max(2_000, Math.round(endMs - startMs)));
 }
 
 export const PLAYER_SHORTCUTS = {
@@ -38,6 +45,12 @@ export type State = {
   requestedLanguage?: string;
   phrases?: TimedPhrase[];
   timingMessage?: string;
+  primaryTrackId?: string;
+  secondaryTrackId?: string | null;
+  secondaryCues?: RawCue[];
+  secondaryLanguage?: string;
+  secondaryStatus?: 'idle' | 'loading' | 'loaded' | 'error';
+  secondaryMessage?: string;
 };
 export const emptyState = (): State => ({ version: 1, video: null, trackId: null, status: 'waiting',
   message: '请打开 YouTube 或 B 站视频', cues: [], eventCount: 0, controlEventCount: 0 });

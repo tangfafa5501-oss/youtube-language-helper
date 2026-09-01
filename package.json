@@ -17,6 +17,11 @@
     "postinstall": "wxt prepare"
   },
   "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-dropdown-menu": "2.1.24",
+    "@radix-ui/react-popover": "1.1.23",
+    "@radix-ui/react-select": "2.3.7",
+    "@radix-ui/react-slider": "1.4.7",
     "lucide-react": "0.479.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",

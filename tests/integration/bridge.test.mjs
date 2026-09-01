@@ -118,12 +118,12 @@ test('production bridges preserve raw entries and seek a late cue on the bound v
 test('playback state follows the bound player and controls update the real video element', async t => {
   const h = await harness(t);
   h.video.currentTime = 12.24;
-  h.send({ version: 1, type: 'playback-rate', rate: .9, videoId: h.state().video.videoId, session: h.state().video.session });
+  h.send({ version: 1, type: 'playback-rate', rate: 1.5, videoId: h.state().video.videoId, session: h.state().video.session });
   h.send({ version: 1, type: 'playback-toggle', videoId: h.state().video.videoId, session: h.state().video.session });
   await new Promise(resolve => setTimeout(resolve, 300));
   const playback = h.messages.filter(message => message.type === 'playback-state').at(-1);
   assert.deepEqual(playback, { type: 'playback-state', videoId: h.state().video.videoId, session: h.state().video.session,
-    trackId: h.state().trackId, currentTimeMs: 12240, playing: true, rate: .9 });
+    trackId: h.state().trackId, currentTimeMs: 12240, playing: true, rate: 1.5 });
 });
 
 test('YouTube playback controls reject a stale subtitle track binding', async t => {
@@ -243,6 +243,46 @@ test('single, loop, and all playback modes enforce Enjoy-compatible segment boun
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, false);
   assert.ok(h.video.currentTime > all.endMs / 1000);
+});
+
+test('YouTube follow mode pauses at a sentence end and can advance immediately to the next sentence', async t => {
+  const h = await harness(t); providerCues(h, [1_000, 3_000]);
+  const [first, second] = h.state().cues;
+  h.seek(first, 'follow'); await tick();
+  h.video.currentTime = first.endMs / 1000;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(h.video.paused, true);
+  h.send({ version: 1, type: 'playback-toggle', videoId: h.state().video.videoId, session: h.state().video.session });
+  await tick();
+  assert.equal(h.video.currentTime, second.startMs / 1000);
+  assert.equal(h.video.paused, false);
+});
+
+test('YouTube keeps a paid secondary subtitle lane independent from primary cues and timing', async t => {
+  const h = await harness(t);
+  const primary = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session,
+    requestId: 'primary-lane', requestedTrackId: h.state().video.tracks[0].id };
+  h.send({ ...primary, type: 'supadata-begin' });
+  h.send({ ...primary, type: 'supadata-finish', requestedLanguage: 'en', data: { lang: 'en', content: [
+    { offset: 1_000, duration: 2_000, text: 'Primary sentence.' },
+  ] } });
+  const primaryTrackId = h.state().trackId;
+  const primaryCues = structuredClone(h.state().cues);
+  const secondaryTrack = h.state().video.tracks[1];
+  const secondary = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session,
+    requestId: 'secondary-lane', requestedTrackId: secondaryTrack.id };
+  h.send({ ...secondary, type: 'supadata-secondary-begin' });
+  h.send({ ...secondary, type: 'supadata-secondary-finish', requestedLanguage: 'zh-Hans', data: { lang: 'zh-CN', content: [
+    { offset: 900, duration: 2_300, text: '第二字幕。' },
+  ] } });
+  assert.equal(h.state().trackId, primaryTrackId);
+  assert.deepEqual(h.state().cues, primaryCues);
+  assert.equal(h.state().secondaryTrackId, secondaryTrack.id);
+  assert.equal(h.state().secondaryLanguage, 'zh-CN');
+  assert.equal(h.state().secondaryCues[0].text, '第二字幕。');
+  h.send({ version: 1, type: 'secondary-clear', videoId: h.state().video.videoId, session: h.state().video.session });
+  assert.equal(h.state().secondaryTrackId, null);
+  assert.deepEqual(h.state().secondaryCues, []);
 });
 
 test('switching YouTube subtitle track cancels the previous loop boundary', async t => {
