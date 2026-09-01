@@ -83,6 +83,14 @@ export function parseJson3WordTimings(body: string): WordTiming[] {
     }
   }
   if (!words.length) throw new Error('网站自动字幕没有提供可用的词级时间');
+  // Rolling ASR events can overlap: the last word of one event inherits that
+  // event's full duration even though the next event has already emitted the
+  // following word. Clamp only that impossible overlap to the next word start.
+  // This repairs the word interval; it is not a pause or sentence heuristic.
+  for (let index = 0; index + 1 < words.length; index++) {
+    const current = words[index]!, next = words[index + 1]!;
+    if (next.startMs > current.startMs && current.endMs > next.startMs) current.endMs = next.startMs;
+  }
   return words;
 }
 

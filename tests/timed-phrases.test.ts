@@ -79,6 +79,32 @@ test('a phrase must match both its first and last spoken word before it gets an 
   ]), /未能对齐/);
 });
 
+test('a final one-letter ASR vocalization keeps earlier exact phrases and marks only itself estimated', () => {
+  const cues = [{ ...cue('First sentence. See you next time. Muah!'), endMs: 8_000 }];
+  const phrases = buildTimedPhrases(cues, [
+    word('first', 0, 700), word('sentence', 700, 2_500),
+    word('see', 2_500, 3_000), word('you', 3_000, 3_500), word('next', 3_500, 4_000), word('time', 4_000, 5_000),
+    word('music', 5_000, 6_000), word('m', 6_000, 8_000),
+  ]);
+  assert.equal(phrases[0]!.text, 'First sentence.');
+  assert.equal(phrases[0]!.timing, 'youtube-word');
+  assert.equal(phrases.at(-1)!.text, 'Muah!');
+  assert.equal(phrases.at(-1)!.endMs, 8_000);
+  assert.equal(phrases.at(-1)!.timing, 'youtube-estimated');
+});
+
+test('high-coverage tracks estimate only local repeated words that the ASR omitted', () => {
+  const text = 'We practise carefully. Cuppa cuppa. Then continue together.';
+  const phrases = buildTimedPhrases([{ ...cue(text), endMs: 9_000 }], [
+    word('we', 0, 500), word('practise', 500, 1_200), word('carefully', 1_200, 2_500),
+    word('cuppa', 2_500, 4_000),
+    word('then', 5_000, 5_500), word('continue', 5_500, 6_500), word('together', 6_500, 8_000),
+  ]);
+  assert.equal(phrases[0]!.timing, 'youtube-word');
+  assert.equal(phrases.some(phrase => phrase.text.includes('Cuppa cuppa.') && phrase.timing === 'youtube-estimated'), true);
+  assert.equal(phrases.at(-1)!.timing, 'youtube-word');
+});
+
 test('matching only the first and last word is insufficient for a mostly unrelated phrase', () => {
   const cues = [cue('Hello alpha beta gamma world.')];
   const timings = ['Hello', 'xray', 'yankee', 'zulu', 'world'].map((text, index) => word(text, index * 600, index * 600 + 500));
@@ -152,7 +178,7 @@ test('a sub-six-second unfinished sentence combines adjacent reading lines', () 
   assert.equal(phrases[0]!.endMs - phrases[0]!.startMs, 5_800);
 });
 
-test('six seconds stays whole and only 6.001 seconds triggers an internal split', () => {
+test('six seconds is a target and a complete semantic boundary may exceed it slightly', () => {
   const text = 'Here is the plan: practise every word carefully now.';
   const build = (duration: number) => {
     const values = text.match(/[A-Za-z]+/g)!;
@@ -160,7 +186,80 @@ test('six seconds stays whole and only 6.001 seconds triggers an internal split'
       word(value, index * (duration / values.length), (index + 1) * (duration / values.length))));
   };
   assert.deepEqual(build(6_000).map(item => item.text), [text]);
-  const over = build(6_001);
-  assert.equal(over.length, 2);
-  assert.ok(over.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 6_000));
+  assert.deepEqual(build(6_001).map(item => item.text), [text]);
+});
+
+test('a natural reading phrase may exceed the suggested six seconds', () => {
+  const first = 'Today, I am very excited to help you pronounce 100 everyday words';
+  const second = 'in my Modern Received Pronunciation accent.';
+  const firstWords = first.match(/[A-Za-z0-9]+/g)!;
+  const secondWords = second.match(/[A-Za-z]+/g)!;
+  const timings = [
+    ...firstWords.map((value, index) => word(value, index * 625, (index + 1) * 625)),
+    ...secondWords.map((value, index) => word(value, 7_500 + index * 500, 7_500 + (index + 1) * 500)),
+  ];
+  const phrases = buildTimedPhrases([cue(`${first} ${second}`)], timings);
+  assert.deepEqual(phrases.map(item => item.text), [first, second]);
+  assert.deepEqual(phrases.map(item => item.endMs - item.startMs), [7_500, 3_000]);
+});
+
+test('a short period tail stays with its sentence instead of joining the next sentence', () => {
+  const first = 'Each focusing on a specific feature of my accent or British everyday vocabulary.';
+  const second = 'I promise you that this works.';
+  const firstWords = first.match(/[A-Za-z]+/g)!;
+  const secondWords = second.match(/[A-Za-z]+/g)!;
+  const firstDuration = firstWords.length * 550;
+  const timings = [
+    ...firstWords.map((value, index) => word(value, index * 550, (index + 1) * 550)),
+    ...secondWords.map((value, index) => word(value, firstDuration + index * 500, firstDuration + (index + 1) * 500)),
+  ];
+  const phrases = buildTimedPhrases([cue(`${first} ${second}`)], timings);
+  assert.deepEqual(phrases.map(item => item.text), [first, second]);
+  assert.deepEqual(phrases.map(item => item.endMs - item.startMs), [7_150, 3_000]);
+});
+
+test('word timing silence alone does not split a semantic sentence', () => {
+  const text = 'We practise these words together.';
+  const timings = [
+    word('We', 0, 400), word('practise', 400, 1_000), word('these', 1_000, 1_400),
+    word('words', 5_400, 5_900), word('together', 5_900, 6_500),
+  ];
+  const phrases = buildTimedPhrases([cue(text)], timings);
+  assert.deepEqual(phrases.map(item => item.text), [text]);
+  assert.equal(phrases[0]!.endMs - phrases[0]!.startMs, 6_500);
+});
+
+test('a semantic comma keeps will help you to build fluency together', () => {
+  const first = 'Well, this technique, often called shadowing, will help you to build fluency,';
+  const second = 'practise your English rhythm and gain confidence.';
+  const firstWords = first.match(/[A-Za-z]+/g)!;
+  const secondWords = second.match(/[A-Za-z]+/g)!;
+  const timings = [
+    ...firstWords.map((value, index) => word(value, index * (6_100 / firstWords.length), (index + 1) * (6_100 / firstWords.length))),
+    ...secondWords.map((value, index) => word(value, 6_100 + index * 450, 6_100 + (index + 1) * 450)),
+  ];
+  const phrases = buildTimedPhrases([cue(`${first} ${second}`)], timings);
+  assert.equal(phrases[0]!.text, first);
+  assert.equal(phrases[0]!.endMs - phrases[0]!.startMs, 6_100);
+});
+
+test('a short prepositional sentence tail stays with the preceding clause', () => {
+  const text = "When I say together, I mean that I'd like you to speak along with me at the same time.";
+  const values = text.match(/[A-Za-z]+(?:['’\-][A-Za-z]+)*/g)!;
+  const timings = values.map((value, index) => word(value, index * 360, (index + 1) * 360));
+  const phrases = buildTimedPhrases([cue(text)], timings);
+  assert.deepEqual(phrases.map(item => item.text), [text]);
+  assert.equal(phrases[0]!.endMs - phrases[0]!.startMs, 6_840);
+});
+
+test('a comma keeps first with the following action when a long timed sentence must split', () => {
+  const text = "Step 1: I'll model each word for you, first slowly and then faster.";
+  const values = text.match(/[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*/g)!;
+  const timings = values.map((value, index) => word(value, index * 700, (index + 1) * 700));
+  const phrases = buildTimedPhrases([cue(text)], timings);
+  assert.deepEqual(phrases.map(item => item.text), [
+    "Step 1: I'll model each word for you,",
+    'first slowly and then faster.',
+  ]);
+  assert.ok(phrases.every(item => item.endMs - item.startMs >= 2_000 && item.endMs - item.startMs <= 6_000));
 });

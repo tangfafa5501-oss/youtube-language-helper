@@ -156,28 +156,34 @@ test('word timing follows the actual Supadata response language rather than the 
   assert.equal(h.state().phrases[0].text, 'Hola mundo.');
   assert.equal(h.state().phrases[0].startMs, 1_000);
 });
-test('production timing keeps the period boundary, folds sub-2s forward, and caps rows at six seconds', async t => {
+test('production timing keeps punctuation and semantic phrases ahead of the six-second target', async t => {
   const h = await harness(t);
   const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
   const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
-  const text = `${first} ${second}`, words = text.match(/[A-Za-z]+|100/g);
-  const firstWords = first.match(/[A-Za-z]+/g).length;
-  const offsets = words.map((_, index) => index < firstWords ? index * 350
-    : firstWords * 350 + (index - firstWords) * 450);
-  h.setWordBody(JSON.stringify({ events: [{ tStartMs: 0, dDurationMs: offsets.at(-1) + 450,
-    segs: words.map((word, index) => ({ utf8: `${index ? ' ' : ''}${word}`, tOffsetMs: offsets[index] })) }] }));
+  const text = `${first} ${second}`, firstTokens = first.match(/[A-Za-z]+/g), secondTokens = second.match(/[A-Za-z]+|100/g);
+  const firstDuration = firstTokens.length * 350, secondDuration = secondTokens.length * 625;
+  // Model a real rolling-ASR overlap: the first event continues beyond its
+  // final word even though the next event begins at the next sentence.
+  h.setWordBody(JSON.stringify({ events: [
+    { tStartMs: 0, dDurationMs: firstDuration + 1_500,
+      segs: firstTokens.map((word, index) => ({ utf8: `${index ? ' ' : ''}${word}`, tOffsetMs: index * 350 })) },
+    { tStartMs: firstDuration, dDurationMs: secondDuration,
+      segs: secondTokens.map((word, index) => ({ utf8: `${index ? ' ' : ''}${word}`, tOffsetMs: index * 625 })) },
+  ] }));
   const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'sbd-two-five' };
   h.send({ ...binding, type: 'supadata-begin' });
   h.send({ ...binding, type: 'supadata-finish', requestedLanguage: 'en', data: { lang: 'en', content: [
     { offset: 0, duration: 5_000, text: `${first} Today, I am` },
-    { offset: 5_000, duration: offsets.at(-1) + 450 - 5_000, text: second.replace(/^Today, I am\s*/, '') },
+    { offset: 5_000, duration: firstDuration + secondDuration - 5_000, text: second.replace(/^Today, I am\s*/, '') },
   ] } });
   h.send({ ...binding, type: 'timing-load', language: 'en' });
   for (let i = 0; i < 50 && /正在尝试/.test(h.state().timingMessage ?? ''); i++) await tick();
   assert.equal(h.state().phrases[0].text, first);
-  assert.equal(h.state().phrases[1].text.startsWith('Today, I am'), true);
+  assert.equal(h.state().phrases[0].endMs, firstDuration);
+  assert.equal(h.state().phrases[1].text, 'Today, I am very excited to help you pronounce 100 everyday words');
+  assert.ok(h.state().phrases[1].endMs - h.state().phrases[1].startMs > 6_000);
   assert.ok(h.state().phrases.every(phrase => phrase.endMs - phrase.startMs >= 2_000
-    && phrase.endMs - phrase.startMs <= 6_000));
+    && phrase.endMs - phrase.startMs <= 10_000));
   assert.equal(h.state().phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });
 test('failed YouTube word alignment still publishes hard 2-6 second SBD phrases from Supadata timing', async t => {

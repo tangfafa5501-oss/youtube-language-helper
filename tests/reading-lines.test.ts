@@ -93,6 +93,20 @@ test('long colon and conjunction pauses become lines while times, URLs and short
   ]);
   assert.deepEqual(readingLines('Meet me at 10:30 and open https://example.com:443/docs.'),
     ['Meet me at 10:30 and open https://example.com:443/docs.']);
+  assert.deepEqual(readingLines('We reviewed every example from the first chapter to the final appendix and then repeated the difficult passages together'), [
+    'We reviewed every example from the first chapter to the final appendix',
+    'and then repeated the difficult passages together',
+  ]);
+});
+
+test('a sequence marker after a comma starts the following reading line', () => {
+  assert.deepEqual(readingLines("Step 1: I'll model each word for you, first slowly and then faster."), [
+    'Step 1:',
+    "I'll model each word for you,",
+    'first slowly and then faster.',
+  ]);
+  assert.deepEqual(readingLines('You can, first, check the short example.'),
+    ['You can, first, check the short example.']);
 });
 
 test('commas inside curly single quotes and bracketed asides do not create false outer clauses', () => {

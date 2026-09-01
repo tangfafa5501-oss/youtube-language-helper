@@ -157,7 +157,7 @@ export default defineContentScript({
       const token = gate.capture();
       const estimatedPhrases = buildEstimatedTimedPhrases(state.cues);
       state = { ...state, phrases: estimatedPhrases, message: '字幕与估算语段时间已就绪',
-        timingMessage: `已按 Supadata 原始时间估算 ${estimatedPhrases.length} 个严格2至6秒语段；正在尝试用 YouTube 词级时间校准` };
+        timingMessage: `已按 Supadata 原始时间估算 ${estimatedPhrases.length} 个自然语段；正在尝试用 YouTube 词级时间校准` };
       publish();
       try {
         const r = await request('word-timing', { videoId: v.videoId, session: v.session, language: timingLanguage });
@@ -165,11 +165,11 @@ export default defineContentScript({
         if (r.videoId !== v.videoId || r.session !== v.session || typeof r.body !== 'string') throw new Error('词级时间响应会话不匹配');
         const phrases = buildTimedPhrases(state.cues, parseJson3WordTimings(r.body));
         state = { ...state, phrases, message: '字幕与独立语段时间已就绪',
-          timingMessage: `已用 YouTube 自动轨词级时间生成 ${phrases.length} 个严格2至6秒语段；SBD句界优先，不足2秒向后合并，超过6秒拆分` };
+          timingMessage: `已用 YouTube 词级时间生成 ${phrases.length} 个自然语段；标点和语义优先，6秒为建议目标` };
       } catch {
         if (!gate.current(token)) return;
         state = { ...state, phrases: estimatedPhrases, message: '字幕与估算语段时间已就绪',
-          timingMessage: `YouTube 词级时间不可用；已按 Supadata 原始时间估算 ${estimatedPhrases.length} 个严格2至6秒语段，句界优先` };
+          timingMessage: `YouTube 词级时间不可用；已按 Supadata 原始时间估算 ${estimatedPhrases.length} 个自然语段，标点和语义优先` };
       }
       publish();
     }

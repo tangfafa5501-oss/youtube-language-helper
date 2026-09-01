@@ -61,19 +61,22 @@ function phraseSentence(sentence: string): string[] {
       && (structuralCuts[structuralIndex] === undefined || structuralCuts[structuralIndex]! > nextComma)
       && wordCount(sentence.slice(comma + 1, nextComma)) <= 4
       && !/[.!?;()]/.test(sentence.slice(comma + 1, nextComma));
-    // Eight words is a local, adjustable heuristic, not a linguistic guarantee.
-    // It retains short lead-ins and joins a short aside to the preceding clause.
-    // A following relative/adverbial clause is an additional visible cue even
-    // when a preceding dash has left a shorter main clause.
+    // Eight words is a local, adjustable semantic heuristic, not a linguistic
+    // guarantee. It retains short lead-ins and joins a short aside to the
+    // preceding clause. A following relative/adverbial or sequence clause is
+    // an additional textual cue even when a preceding structural boundary has
+    // left a shorter main clause. Audio pauses are not inspected here.
     const clauseAhead = /^\s*(?:each|which|who|where|when|because|although)\b/i.test(sentence.slice(comma + 1));
-    if (wordCount(sentence.slice(start, comma)) >= (clauseAhead ? 4 : 8) && !shortAsideAhead) {
+    const sequenceAhead = /^\s*(?:first(?:ly)?|second(?:ly)?|next|then|finally)\b/i.test(sentence.slice(comma + 1));
+    if (wordCount(sentence.slice(start, comma)) >= (clauseAhead || sequenceAhead ? 4 : 8) && !shortAsideAhead) {
       cuts.add(comma + 1); start = comma + 1;
     }
   }
-  // A late prepositional tail is a natural reading pause in a long clause,
-  // even when the source sentence has no comma there. Split only when both
+  // A late prepositional tail is a semantic boundary in a long clause even
+  // when transferred captions lost their punctuation. Split only when both
   // sides are substantial so ordinary short phrases such as "in the house"
-  // stay intact. The boundary is generic; it is not tied to a sample sentence.
+  // stay intact. The boundary is generic; it is not tied to audio silence or a
+  // sample sentence.
   const existingCuts = [0, ...cuts, sentence.length].sort((a, b) => a - b);
   for (let part = 0; part + 1 < existingCuts.length; part++) {
     const partStart = existingCuts[part]!, partEnd = existingCuts[part + 1]!;

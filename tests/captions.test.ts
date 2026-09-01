@@ -54,6 +54,21 @@ test('JSON3 ASR segment offsets become absolute word timings without text interp
   ]);
 });
 
+test('overlapping rolling ASR event tails stop at the following word start', () => {
+  const words = parseJson3WordTimings(JSON.stringify({ events: [
+    { tStartMs: 0, dDurationMs: 4_000,
+      segs: [{ utf8: 'hello', tOffsetMs: 0 }, { utf8: ' world', tOffsetMs: 500 }] },
+    { tStartMs: 2_000, dDurationMs: 1_000,
+      segs: [{ utf8: 'today', tOffsetMs: 0 }, { utf8: ' begins', tOffsetMs: 500 }] },
+  ] }));
+  assert.deepEqual(words, [
+    { text: 'hello', startMs: 0, endMs: 500 },
+    { text: ' world', startMs: 500, endMs: 2_000 },
+    { text: 'today', startMs: 2_000, endMs: 2_500 },
+    { text: ' begins', startMs: 2_500, endMs: 3_000 },
+  ]);
+});
+
 test('word timings reject missing, duplicate, decreasing and out-of-event offsets', () => {
   const parse = (segs: unknown[]) => parseJson3WordTimings(JSON.stringify({ events: [{ tStartMs: 1000, dDurationMs: 2000, segs }] }));
   for (const segments of [
