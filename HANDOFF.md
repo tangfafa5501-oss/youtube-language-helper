@@ -1,6 +1,6 @@
 # Video Language Helper 交接记录
 
-更新时间：2026-09-02 11:24（Asia/Taipei）
+更新时间：2026-09-02 23:39（Asia/Taipei）
 仓库：`D:\github\youtube-language-helper`
 分支：`codex/initial-design`
 当前代码提交：`d3b3974 fix: use native captions and enforce phrase rows`
@@ -14,17 +14,17 @@
 固定产品要求：
 
 - YouTube 只使用网页原生字幕；B站继续使用网站官方字幕。
-- Supadata 已退出生产路线，不再提供 Key、付费请求、备用按钮或自动调用。
+- 已撤销的第三方付费字幕服务已退出生产路线，不再提供 Key、付费请求、备用按钮或自动调用。
 - canonical cues/timing 保持不变；自然语句是仅用于显示和学习控制的派生层。
 - 不足 2000ms 的派生行向后合并；不再设置 5 秒硬拆分上限。
 - 必须区分静态、单元测试、生产包模拟、真实数据离线回放、独立测试浏览器和用户当前安装环境，低等级证据不能冒充高等级证据。
 
 ## 2. 完成了什么
 
-- 已提交 `d3b3974`，共变更 27 个文件：接入 YouTube 原生字幕捕获/缓存/请求，删除 Supadata、旧 reading-lines/timed-phrases 生产实现及相应旧测试，更新设置、协议、侧栏和集成测试。
+- 已提交 `d3b3974`，共变更 27 个文件：接入 YouTube 原生字幕捕获/缓存/请求，删除旧第三方字幕服务、旧 reading-lines/timed-phrases 生产实现及相应旧测试，更新设置、协议、侧栏和集成测试。
 - 后台已监听 `/api/timedtext`，捕获正文与 `pot/potc`；内容脚本会消费实时 `captured` 消息，并在连接或刷新时优先查询 `latest` 缓存。失败、超时和格式异常均会回退到正常选轨请求，不会把侧栏卡在准备状态。
 - 原生字幕解析和派生语句规则已落到 `lib/youtube-native.ts`：保留原始 cue，显示层合并不足 2 秒的片段，不做旧的 5 秒强拆分。
-- Supadata 生产入口、可选域权限、设置 UI、付费请求路由和旧实现文件已删除；后台仅保留一次性迁移，用于删除旧 `supadata-v1` 存储和权限。对应安全回归仍保留，确保旧操作失败关闭且不会发起付费请求。
+- 旧第三方字幕服务的生产入口、可选域权限、设置 UI、付费请求路由和旧实现文件已删除；后台仅保留一次性迁移，用于删除遗留存储和权限。对应安全回归仍保留，确保旧操作失败关闭且不会发起付费请求。
 - 提交前验证记录：77/77 单元测试、61/61 生产 bundle 集成测试、TypeScript 类型检查和生产构建全部通过。
 - 2026-09-02 11:02（Asia/Taipei），独立 Chrome for Testing 152 完成生产包真实数据回放，断言脚本输出 `ALL PASSED (100%)`，24/24 断言通过：
   - 脚本调用 `chrome.runtime.reload()`；记录旧 Worker `close`，关闭旧测试浏览器进程并以同一 Profile/加载目录重启，获得不同实例令牌的新 Worker，再额外等待 750ms。
@@ -37,17 +37,18 @@
   - `artifacts/acceptance/test-browser-realdata-replay.png`
   - `artifacts/acceptance/test-browser-realdata-replay.png.json`
 - 两张旧 `youtube-native-production-simulated-*.png` 没有纳入提交，已从仓库移到可恢复的临时备份目录：`C:\Users\alxanday\AppData\Local\Temp\youtube-language-helper-obsolete-simulated-20260902`。
+- 2026-09-02 23:39 已全面重写 `README.md`、`design-qa.md` 及 `docs/` 中 5 份含旧路线的 Markdown；目标范围 8 个 Markdown 的旧服务名称/域名扫描结果为 0。
+- 本轮文档清理前后 `lib/youtube-native.ts` SHA-256 均为 `BAB102B58F7B37ED4E8FA48CF295366D3034758DE0DE34FD24133154DC5D58DA`；`npm test` 实际输出 77/77 PASSED、0 failed。
 
 ## 3. 卡在哪里
 
 - 当前最高证据等级是 `test-browser real-data replay`，不是用户当前 Chrome 的 `installed-real`，也不是 live timedtext 网络请求。Chrome for Testing 没有把原生 Side Panel 暴露为 Playwright page target；脚本虽调用 `chrome.sidePanel.open()`，仍只能在真实生产 `sidepanel.html` 页面完成 DOM/交互回放。
-- `README.md`、`design-qa.md`、`docs/design.md`、`docs/m0-validation.md`、`docs/subtitle-diagnosis.md` 等文档仍含大量 Supadata 主路线、旧 5/6 秒规则和过期测试数字。生产代码已经退出该路线，但文档尚未统一清理。
-- 分支相对 `origin/codex/initial-design` 领先 3 个本地提交，尚未推送。本轮不自动推送。
+- 分支存在尚未推送的本地提交；准确数量以当前 `git status` 为准。本轮不自动推送。
 
 ## 4. 下一步计划
 
-1. 清理 README、设计和验收文档中的 Supadata/旧时长规则，明确历史记录与当前实现的边界；文档变更不得改变已通过的生产行为。
-2. 在可自动控制用户当前 Chrome 原生 Side Panel 时，用同一构建、同一哈希和同一 DOM 断言补做 `installed-real` 验收；在此之前不得升级证据等级。
+1. 在可自动控制用户当前 Chrome 原生 Side Panel 时，用同一构建、同一哈希和同一 DOM 断言补做 `installed-real` 验收；在此之前不得升级证据等级。
+2. 若继续验证实时网络字幕，记录 timedtext 完成、后台捕获、标签页收到消息和侧栏首行渲染四个时间点。
 3. 用户明确要求后再推送 `codex/initial-design`；推送前复核提交列表、远端和干净工作区。
 
 ## 5. 碰到哪些问题
