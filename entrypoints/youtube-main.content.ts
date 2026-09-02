@@ -8,6 +8,7 @@ export default defineContentScript({
     let session = crypto.randomUUID();
     let inFlight: AbortController | null = null;
     let busy = false;
+    let captionPrime: { session: string; toggled: boolean } | null = null;
     const urls = new Map<string, string>();
     async function boundedBody(response: Response, maxBytes: number, label: string) {
       const reader = response.body?.getReader();
@@ -59,58 +60,51 @@ export default defineContentScript({
       result.availability = result.tracks.length ? '' : '当前播放器没有提供可读取的字幕轨';
       return result;
     }
-    document.addEventListener('yt-navigate-start', () => { session = crypto.randomUUID(); inFlight?.abort(); });
+    function nativeClient() {
+      const ytcfg = (window as unknown as { ytcfg?: { get?: (key: string) => unknown } }).ytcfg;
+      const context = ytcfg?.get?.('INNERTUBE_CONTEXT');
+      const client = record(context) && record(context.client) ? context.client : {};
+      const pick = (key: string) => typeof client[key] === 'string' ? String(client[key]).slice(0, 200) : undefined;
+      return Object.fromEntries(Object.entries({ c: pick('clientName'), cver: pick('clientVersion'), cos: pick('osName'),
+        cosver: pick('osVersion'), cplatform: pick('platform'), cbr: pick('browserName'), cbrver: pick('browserVersion'),
+        cplayer: 'UNIPLAYER', xorb: '2', xobt: '3', xovt: '3' }).filter(([, value]) => value));
+    }
+    function subtitleButton() {
+      return document.querySelector<HTMLButtonElement>('#movie_player .ytp-subtitles-button');
+    }
+    document.addEventListener('yt-navigate-start', () => { session = crypto.randomUUID(); captionPrime = null; inFlight?.abort(); });
     addEventListener('message', async event => {
       const m = event.data;
       if (event.source !== window || event.origin !== location.origin || !record(m) || m.channel !== CHANNEL || m.direction !== 'request'
         || m.version !== 1 || typeof m.requestId !== 'string' || !/^[\w-]{1,100}$/.test(m.requestId)) return;
       const reply = (payload: object) => window.postMessage({ channel: CHANNEL, direction: 'response', version: 1, requestId: m.requestId, ...payload }, location.origin);
       if (m.type === 'info') { reply({ video: info() }); return; }
-      if (m.type === 'word-timing') {
-        if (typeof m.videoId !== 'string' || typeof m.session !== 'string' || typeof m.language !== 'string') return;
-        if (busy) { reply({ error: '上一字幕请求仍在结束，请稍后重试' }); return; }
+      if (m.type === 'native-target') {
+        if (typeof m.trackId !== 'string') return;
         const v = info();
-        if (!v || m.videoId !== v.videoId || m.session !== v.session || !/^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/.test(m.language)) {
-          reply({ error: '视频已切换，未请求词级时间' }); return;
+        if (!v || m.videoId !== v.videoId || m.session !== v.session || !urls.has(m.trackId)) {
+          reply({ error: '视频或字幕轨已切换，请重新读取' }); return;
         }
-        busy = true; const controller = new AbortController(); inFlight = controller;
-        const timeout = setTimeout(() => controller.abort(), 30_000);
-        try {
-          const ytcfg = (window as unknown as { ytcfg?: { get?: (key: string) => unknown } }).ytcfg;
-          const visitorData = ytcfg?.get?.('VISITOR_DATA');
-          if (typeof visitorData !== 'string' || visitorData.length < 20 || visitorData.length > 2000) throw new Error('YouTube 页面没有可用访客会话');
-          const context = { client: { clientName: 'VISIONOS', clientVersion: '1.02', deviceMake: 'Apple',
-            deviceModel: 'RealityDevice17,1', osName: 'visionOS', osVersion: '26.5.23O471', hl: 'en',
-            timeZone: 'UTC', utcOffsetMinutes: 0, visitorData } };
-          const playerResponse = await fetch('/youtubei/v1/player?prettyPrint=false', { method: 'POST', credentials: 'include',
-            signal: controller.signal, redirect: 'error', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-YouTube-Client-Name': '101',
-              'X-YouTube-Client-Version': '1.02', 'X-Goog-Visitor-Id': visitorData },
-            body: JSON.stringify({ videoId: v.videoId, context,
-              playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } } }) });
-          if (!playerResponse.ok) throw new Error(`YouTube 播放器接口失败：HTTP ${playerResponse.status}`);
-          let player: unknown;
-          try { player = JSON.parse(await boundedBody(playerResponse, 4_000_000, 'YouTube 播放器')); }
-          catch (error) { throw error instanceof SyntaxError ? new Error('YouTube 播放器响应格式异常') : error; }
-          if (!record(player) || !record(player.videoDetails) || player.videoDetails.videoId !== v.videoId) throw new Error('YouTube 播放器响应与视频不匹配');
-          const captions = record(player.captions) ? player.captions : {};
-          const renderer = record(captions.playerCaptionsTracklistRenderer) ? captions.playerCaptionsTracklistRenderer : {};
-          const tracks = Array.isArray(renderer.captionTracks) ? renderer.captionTracks.filter(record) : [];
-          const baseLanguage = m.language.toLowerCase().split('-')[0];
-          const track = tracks.find(t => t.kind === 'asr' && String(t.languageCode).toLowerCase().split('-')[0] === baseLanguage)
-            ?? tracks.find(t => t.kind === 'asr');
-          if (!track || typeof track.baseUrl !== 'string') throw new Error('当前视频没有自动字幕词级时间轨');
-          const target = captionUrl(track.baseUrl, v.videoId);
-          if (!target) throw new Error('词级字幕地址未通过来源校验');
-          const response = await fetch(target, { credentials: 'include', signal: controller.signal, redirect: 'error' });
-          if (!response.ok) throw new Error(`词级字幕请求失败：HTTP ${response.status}`);
-          const body = await boundedBody(response, 8_000_000, '词级字幕');
-          if (!body.trim()) throw new Error('词级字幕返回空内容');
-          if (info()?.session !== v.session) throw new Error('视频已切换，旧词级时间已丢弃');
-          reply({ body, videoId: v.videoId, session: v.session });
-        } catch (error) {
-          reply({ error: error instanceof Error && error.name === 'AbortError' ? '词级时间请求超时或视频切换，已停止' : error instanceof Error ? error.message : '词级时间请求失败' });
-        } finally { clearTimeout(timeout); busy = false; if (inFlight === controller) inFlight = null; }
+        reply({ videoId: v.videoId, session: v.session, trackId: m.trackId, baseUrl: urls.get(m.trackId), client: nativeClient() });
         return;
+      }
+      if (m.type === 'prime-captions') {
+        const v = info();
+        if (!v || m.videoId !== v.videoId || m.session !== v.session) { reply({ error: '视频已切换，未触发字幕轨' }); return; }
+        if (captionPrime?.session === v.session) { reply({ primed: true, toggled: captionPrime.toggled }); return; }
+        const button = subtitleButton();
+        if (!button || button.disabled) { reply({ error: 'YouTube 字幕按钮尚未就绪' }); return; }
+        const toggled = button.getAttribute('aria-pressed') !== 'true';
+        if (toggled) button.click();
+        captionPrime = { session: v.session, toggled };
+        reply({ primed: true, toggled }); return;
+      }
+      if (m.type === 'restore-captions') {
+        const v = info(); const prime = captionPrime; captionPrime = null;
+        if (v && prime?.session === v.session && prime.toggled) {
+          const button = subtitleButton(); if (button?.getAttribute('aria-pressed') === 'true') button.click();
+        }
+        reply({ restored: true }); return;
       }
       if (m.type !== 'load' || typeof m.trackId !== 'string') return;
       if (busy) { reply({ error: '上一字幕请求仍在结束，请稍后重试' }); return; }

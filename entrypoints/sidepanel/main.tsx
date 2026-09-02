@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -18,7 +18,7 @@ import { secondaryTextForRange } from '../../lib/subtitle-lanes';
 import { applyTheme } from '../../lib/theme';
 import './style.css';
 
-const defaultSettings: PublicSettings = { hasKey: false, language: 'en', theme: 'system', displayMode: 'phrases' };
+const defaultSettings: PublicSettings = { language: 'en', theme: 'system', displayMode: 'phrases' };
 
 function timestamp(ms: number | null) {
   if (ms === null) return '时间异常';
@@ -121,7 +121,6 @@ function GuideDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (ope
 function App() {
   const [state, setState] = useState<State>(emptyState);
   const [settings, setSettings] = useState<PublicSettings>(defaultSettings);
-  const [settingsReady, setSettingsReady] = useState(false);
   const [view, setView] = useState<'reader' | 'settings'>('reader');
   const [playback, setPlayback] = useState('');
   const [selected, setSelected] = useState('');
@@ -132,9 +131,8 @@ function App() {
   const [currentTimeMs, setCurrentTimeMs] = useState<number | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
-  const remoteBusy = useRef(new Set<string>());
-  const [pendingLanes, setPendingLanes] = useState<Set<string>>(() => new Set());
   const autoRequestedSessionRef = useRef('');
+  const desiredSecondaryRef = useRef<string | null>(null);
   const connectionRef = useRef<ReturnType<typeof connectPanel> | null>(null);
   const viewRef = useRef({ videoId: '', session: '', track: '' });
 
@@ -143,7 +141,7 @@ function App() {
     void browser.runtime.sendMessage({ channel: SERVICE_CHANNEL, version: 1, type: 'settings' }).then((reply: ServiceReply) => {
       if (!active || !reply.ok || !reply.settings) return;
       setSettings(reply.settings); applyTheme(reply.settings.theme);
-    }).catch(() => { /* Loading state will expose the settings route. */ }).finally(() => { if (active) setSettingsReady(true); });
+    }).catch(() => { /* Loading state will expose the settings route. */ });
     return () => { active = false; };
   }, []);
 
@@ -159,6 +157,7 @@ function App() {
       reset: (message, error) => {
         setState({ ...emptyState(), status: error ? 'error' : 'waiting', message }); setPlayback(''); setSelected('');
         setCurrentTimeMs(null); setPlaying(false); setRate(1); setPlayMode('all');
+        autoRequestedSessionRef.current = ''; desiredSecondaryRef.current = null;
         viewRef.current = { videoId: '', session: '', track: '' };
       },
       message: (value, tabId) => {
@@ -191,46 +190,33 @@ function App() {
   const primaryTrack = video?.tracks.find(track => track.id === primaryTrackId) ?? preferredTrack;
   const secondaryTrackId = video?.tracks.some(track => track.id === state.secondaryTrackId) ? state.secondaryTrackId! : 'none';
   const secondaryTracks = (video?.tracks ?? []).filter(track => track.id !== primaryTrackId);
-  const primaryBusy = state.status === 'loading' || pendingLanes.has('primary');
-  const secondaryBusy = state.secondaryStatus === 'loading' || pendingLanes.has('secondary');
+  const primaryBusy = state.status === 'loading';
+  const secondaryBusy = state.secondaryStatus === 'loading';
   const phraseRows = state.phrases ?? [];
-  const rawFallback = settings.displayMode === 'raw' || !phraseRows.length;
   const echoRows = useMemo<EchoRow[]>(() => {
-    const base = rawFallback ? state.cues.map(cue => ({ id: `raw:${cue.cueId}`, text: cue.text, startMs: cue.startMs, endMs: cue.endMs, cueId: cue.cueId }))
-      : phraseRows.map(phrase => ({ ...phrase, phraseId: phrase.id }));
+    // The learning list has one invariant: it renders the sentence-level rows produced by
+    // the content script. Raw ASR events remain in state for diagnostics and seeking, but
+    // must never silently replace phrases because that reintroduces split fragments.
+    const base = phraseRows.map(phrase => ({ ...phrase, phraseId: phrase.id }));
     return base.map(row => ({ ...row, secondaryText: secondaryTextForRange(state.secondaryCues ?? [], row.startMs, row.endMs) }));
-  }, [rawFallback, phraseRows, state.cues, state.secondaryCues]);
-
-  async function loadSupadata(requestedTrack: Track | undefined, lane: 'primary' | 'secondary') {
-    if (!video || state.tabId === undefined || !requestedTrack || !settingsReady || !settings.hasKey || isBilibili) return;
-    const busyKey = `${video.session}:${lane}`;
-    if (remoteBusy.current.has(busyKey) || lane === 'primary' && primaryBusy || lane === 'secondary' && (primaryBusy || secondaryBusy)) return;
-    remoteBusy.current.add(busyKey); setPendingLanes(previous => new Set(previous).add(lane));
-    const requestId = crypto.randomUUID();
-    const binding = { version: 1, requestId, videoId: video.videoId, session: video.session, requestedTrackId: requestedTrack.id };
-    const controller = connectionRef.current;
-    controller?.send({ ...binding, type: lane === 'primary' ? 'supadata-begin' : 'supadata-secondary-begin' });
-    try {
-      const response: ServiceReply = await browser.runtime.sendMessage({ channel: SERVICE_CHANNEL, version: 1, type: 'transcript',
-        purpose: lane, tabId: state.tabId, videoId: video.videoId, language: requestedTrack.language });
-      controller?.send({ ...binding, type: lane === 'primary' ? 'supadata-finish' : 'supadata-secondary-finish', ...(response.ok
-        ? { data: response.data, requestedLanguage: response.requestedLanguage }
-        : { error: response.error ?? '服务请求失败' }) });
-      if (lane === 'primary' && response.ok) controller?.send({ ...binding, type: 'timing-load', language: response.requestedLanguage ?? requestedTrack.language });
-    } catch {
-      controller?.send({ ...binding, type: lane === 'primary' ? 'supadata-finish' : 'supadata-secondary-finish',
-        error: '扩展后台请求中断；已提交的请求仍可能消耗额度' });
-    } finally {
-      remoteBusy.current.delete(busyKey);
-      setPendingLanes(previous => { const next = new Set(previous); next.delete(lane); return next; });
-    }
-  }
+  }, [phraseRows, state.secondaryCues]);
 
   useEffect(() => {
-    if (!settingsReady || !settings.hasKey || !video || isBilibili || state.status !== 'ready' || !preferredTrack) return;
-    if (autoRequestedSessionRef.current === video.session) return;
-    autoRequestedSessionRef.current = video.session; void loadSupadata(preferredTrack, 'primary');
-  }, [settingsReady, settings.hasKey, video?.session, isBilibili, state.status, preferredTrack?.id]);
+    if (!video || isBilibili || state.status !== 'ready' || !preferredTrack) return;
+    const requestKey = `${video.session}:${preferredTrack.id}`;
+    if (autoRequestedSessionRef.current === requestKey) return;
+    autoRequestedSessionRef.current = requestKey;
+    connectionRef.current?.send({ version: 1, type: 'load', trackId: preferredTrack.id,
+      videoId: video.videoId, session: video.session, userInitiated: false });
+  }, [video?.session, isBilibili, state.status, preferredTrack?.id]);
+
+  useEffect(() => {
+    const requested = desiredSecondaryRef.current;
+    if (!video || isBilibili || state.status !== 'loaded' || !requested || !video.tracks.some(track => track.id === requested)) return;
+    desiredSecondaryRef.current = null;
+    connectionRef.current?.send({ version: 1, type: 'load-secondary', trackId: requested,
+      videoId: video.videoId, session: video.session });
+  }, [video?.session, isBilibili, state.status, state.primaryTrackId]);
 
   const selectTracks = (nextPrimaryId: string, nextSecondaryId: string | null) => {
     if (!video) return;
@@ -239,8 +225,13 @@ function App() {
     if (isBilibili) connectionRef.current?.send({ version: 1, type: 'bilibili-select', trackId: primary.id,
       secondaryTrackId: secondary?.id ?? null, videoId: video.videoId, session: video.session });
     else {
-      if (primary.id !== primaryTrackId || state.status !== 'loaded') void loadSupadata(primary, 'primary');
-      else if (secondary) void loadSupadata(secondary, 'secondary');
+      if (primary.id !== primaryTrackId || state.status !== 'loaded') {
+        desiredSecondaryRef.current = secondary?.id ?? null;
+        connectionRef.current?.send({ version: 1, type: 'load', trackId: primary.id, videoId: video.videoId,
+          session: video.session, userInitiated: true });
+      }
+      else if (secondary) connectionRef.current?.send({ version: 1, type: 'load-secondary', trackId: secondary.id,
+        videoId: video.videoId, session: video.session });
       else connectionRef.current?.send({ version: 1, type: 'secondary-clear', videoId: video.videoId, session: video.session });
     }
   };
@@ -283,8 +274,25 @@ function App() {
   const reserved = (feature: string) => setPlayback(`${feature}按钮已预留，当前版本尚未开放。`);
   const refreshCaptions = () => {
     if (isBilibili) connectionRef.current?.send({ version: 1, type: 'refresh' });
-    else { autoRequestedSessionRef.current = ''; void loadSupadata(primaryTrack, 'primary'); }
+    else if (video && primaryTrack) {
+      autoRequestedSessionRef.current = `${video.session}:${primaryTrack.id}`;
+      connectionRef.current?.send({ version: 1, type: 'load', force: true, trackId: primaryTrack.id,
+        videoId: video.videoId, session: video.session, userInitiated: true });
+    }
   };
+
+  useLayoutEffect(() => {
+    if (!echoRows.length || state.status !== 'loaded' || !state.nativeTimeline || !video) return;
+    const root = document.documentElement;
+    root.dataset.nativeVideoId = video.videoId;
+    root.dataset.nativeSource = state.nativeTimeline.source;
+    root.dataset.nativeCapturedAt = String(state.nativeTimeline.capturedAt);
+    root.dataset.nativeDeliveredAt = String(state.nativeTimeline.deliveredAt);
+    root.dataset.nativeRenderedAt = String(Date.now());
+    if (state.nativeTimeline.requestCompletedAt) {
+      root.dataset.nativeRequestCompletedAt = String(state.nativeTimeline.requestCompletedAt);
+    } else delete root.dataset.nativeRequestCompletedAt;
+  }, [echoRows.length, state.status, state.nativeTimeline, video?.videoId]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -308,7 +316,7 @@ function App() {
 
   if (view === 'settings') return <SettingsView onBack={() => setView('reader')} onSettings={next => { setSettings(next); applyTheme(next.theme); }}/>
 
-  if (echoRows.length && state.status === 'loaded') return <main className="echo-shell">
+  if (echoRows.length && state.status === 'loaded') return <main className="echo-shell" data-display-mode="phrases">
     <header className="echo-toolbar">
       <TrackSelect label="主字幕" value={primaryTrackId} disabled={primaryBusy || !primaryTrackId} placeholder="主字幕" tracks={video?.tracks ?? []} isBilibili={isBilibili}
         onChange={value => selectTracks(value, secondaryTrackId === 'none' || value === secondaryTrackId ? null : secondaryTrackId)}/>
@@ -366,14 +374,13 @@ function App() {
     <ShortcutDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}/><GuideDialog open={guideOpen} onOpenChange={setGuideOpen}/>
   </main>;
 
-  const fetching = primaryBusy || !settingsReady || Boolean(video && !isBilibili && settings.hasKey && state.status === 'ready');
+  const fetching = primaryBusy || Boolean(video && !isBilibili && state.status === 'ready');
   return <main className="echo-empty-shell">
     <header className="echo-empty-toolbar"><strong>Video Language Helper</strong><span/><button className="echo-icon" aria-label="设置" onClick={() => setView('settings')}><Settings/></button></header>
     {video ? <div className="echo-connected"><span>✓</span>视频已连接</div> : null}
     <section className="echo-empty">
       {fetching ? <div className="echo-load-card"><div className="echo-load-spinner" aria-hidden="true"/><h1>正在准备字幕</h1><p>{state.message}</p><div className="echo-progress"><span/></div><small>只读取视频已有字幕，不生成转录</small></div>
-      : !isBilibili && !settings.hasKey ? <div className="echo-load-card echo-message-card"><div className="echo-state-icon">V</div><h1>设置字幕服务</h1><p>保存 Supadata Key 后，新视频会话自动读取一次主字幕。</p><button className="echo-primary" onClick={() => setView('settings')}>打开设置</button></div>
-      : state.status === 'error' ? <div className="echo-load-card echo-message-card failed"><div className="echo-state-icon failed">!</div><h1>字幕获取失败</h1><p role="alert">{state.message}</p><button className="echo-primary" onClick={refreshCaptions}>重新获取字幕</button></div>
+      : state.status === 'error' ? <div className="echo-load-card echo-message-card failed"><div className="echo-state-icon failed">!</div><h1>字幕获取失败</h1><p role="alert">{state.message}</p><div className="echo-message-actions"><button className="echo-primary" onClick={refreshCaptions}>重试 YouTube 原生字幕</button></div></div>
       : <div className="echo-load-card echo-message-card"><div className="echo-state-icon">V</div><h1>{video?.title || '打开一个视频'}</h1><p>{state.message}</p><button className="echo-primary" onClick={() => setConnection(value => value + 1)}>重新连接</button></div>}
     </section>
   </main>;

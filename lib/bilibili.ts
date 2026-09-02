@@ -1,7 +1,7 @@
 import { record, type RawCue } from './captions.ts';
 import { groupSentences, type CaptionGroup } from './sentence-groups.ts';
 import { signedPlayerUrl } from './bilibili-wbi.ts';
-import type { TimedPhrase } from './timed-phrases.ts';
+import type { TimedPhrase } from './protocol.ts';
 
 export type BiliTrack = { id: string; name: string; language: string; kind: 'manual' | 'asr'; url: string;
   secondary?: { id: string; name: string; language: string; url: string } };

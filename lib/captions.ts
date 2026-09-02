@@ -23,7 +23,7 @@ function time(value: unknown): number | null {
 // Keep every text event, including duplicates, whitespace, overlaps and bad timing.
 export function parseJson3(body: string, trackId: string): { cues: RawCue[]; eventCount: number; controlEventCount: number } {
   if (body.length > 8_000_000) throw new Error('字幕响应过大，M0 不截断显示');
-  if (!body.trim()) throw new Error('网页直读返回空内容；此实验路径尚未修复。请使用上方“读取字幕 · Supadata”按钮');
+  if (!body.trim()) throw new Error('YouTube 原生字幕返回空内容，请重新获取当前字幕轨');
   let data: unknown;
   try { data = JSON.parse(body); } catch { throw new Error('字幕响应不是 JSON3，未进行猜测转换'); }
   if (!record(data) || !Array.isArray(data.events) || data.events.length > 40_000) {

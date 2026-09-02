@@ -1,5 +1,12 @@
 import { record, type RawCue } from './captions.ts';
-import type { TimedPhrase } from './timed-phrases.ts';
+
+export type TimedPhrase = {
+  id: string;
+  text: string;
+  startMs: number;
+  endMs: number;
+  timing: 'youtube-word' | 'youtube-estimated' | 'bilibili-cue' | 'youtube-native';
+};
 
 export const CHANNEL = 'ylh-page-v1';
 export const PORT = 'ylh-panel-v1';
@@ -40,7 +47,7 @@ export type State = {
   version: 1; tabId?: number; video: VideoInfo | null; trackId: string | null;
   status: 'waiting' | 'ready' | 'loading' | 'loaded' | 'error';
   message: string; cues: RawCue[]; eventCount: number; controlEventCount: number;
-  source?: 'youtube' | 'supadata' | 'bilibili';
+  source?: 'youtube' | 'bilibili';
   language?: string;
   requestedLanguage?: string;
   phrases?: TimedPhrase[];
@@ -51,6 +58,12 @@ export type State = {
   secondaryLanguage?: string;
   secondaryStatus?: 'idle' | 'loading' | 'loaded' | 'error';
   secondaryMessage?: string;
+  nativeTimeline?: {
+    requestCompletedAt?: number;
+    capturedAt: number;
+    deliveredAt: number;
+    source: 'captured' | 'latest' | 'cache' | 'network';
+  };
 };
 export const emptyState = (): State => ({ version: 1, video: null, trackId: null, status: 'waiting',
   message: '请打开 YouTube 或 B 站视频', cues: [], eventCount: 0, controlEventCount: 0 });

@@ -1,8 +1,8 @@
-import { parseJson3, parseJson3WordTimings, record, watchVideoId } from '../lib/captions';
+import { parseJson3, record, watchVideoId } from '../lib/captions';
 import { CHANNEL, PORT, emptyState, followPauseMs, isPlaybackRate, isVideoInfo, type PlayMode, type State } from '../lib/protocol';
 import { SessionGate } from '../lib/session';
-import { parseSupadata, validLanguage } from '../lib/supadata';
-import { buildEstimatedTimedPhrases, buildTimedPhrases } from '../lib/timed-phrases';
+import { YOUTUBE_NATIVE_CHANNEL, nativeDisplayPhrases, normalizeNativeLanguage, validNativeTranscript, type NativeTrackKind,
+  type NativeTranscript } from '../lib/youtube-native';
 
 export default defineContentScript({
   matches: ['https://www.youtube.com/*'], runAt: 'document_start',
@@ -16,8 +16,21 @@ export default defineContentScript({
     let infoBusy = false;
     let activePlayback: ActivePlayback | null = null;
     let playbackGeneration = 0;
+    let secondaryGeneration = 0;
+    let explicitPrimaryTrackId: string | null = null;
+    let pendingCaptured: { entry: NativeTranscript; deliveredAt: number } | null = null;
     const pending = new Map<string, { resolve: (data: Record<string, unknown>) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    const writeDiagnostics = () => {
+      const root = document.documentElement;
+      if (!root) return;
+      root.dataset.ylhBuild = 'sbd-sentences-v1';
+      root.dataset.ylhStatus = state.status;
+      const phrases = state.phrases ?? [];
+      root.dataset.ylhPhraseCount = String(phrases.length);
+      root.dataset.ylhUnderTwoCount = String(phrases.filter(row => row.endMs - row.startMs < 2_000).length);
+    };
     const publish = () => {
+      writeDiagnostics();
       for (const port of clients) {
         try { port.postMessage(state); } catch { clients.delete(port); }
       }
@@ -56,11 +69,68 @@ export default defineContentScript({
       else task.resolve(m);
     });
     function reset(message = '正在读取当前视频…') {
-      gate.next(); activePlayback = null; playbackGeneration++; infoBusy = false;
+      gate.next(); secondaryGeneration++; activePlayback = null; playbackGeneration++; infoBusy = false;
+      explicitPrimaryTrackId = null; pendingCaptured = null;
       for (const task of pending.values()) { clearTimeout(task.timer); task.reject(new Error('视频会话已切换')); }
       pending.clear(); state = { ...emptyState(), message }; publish();
     }
     function clearPlaybackBoundary() { activePlayback = null; playbackGeneration++; }
+    function matchingNativeTrack(video: NonNullable<State['video']>, entry: NativeTranscript) {
+      const language = normalizeNativeLanguage(entry.language);
+      const candidates = video.tracks.filter(track => track.kind === entry.kind);
+      const exact = candidates.find(track => normalizeNativeLanguage(track.language) === language);
+      if (exact) return exact;
+      const base = language.split('-')[0];
+      const compatible = candidates.filter(track => normalizeNativeLanguage(track.language).split('-')[0] === base);
+      return compatible.length === 1 ? compatible[0]! : null;
+    }
+    function parsedNativeEntry(entry: NativeTranscript, trackId: string) {
+      if (entry.format !== 'youtube-timedtext-json3') return null;
+      try {
+        const parsed = parseJson3(entry.body, trackId);
+        return { parsed, phrases: nativeDisplayPhrases(parsed.cues) };
+      } catch { return null; }
+    }
+    function entryMatchesSelectedTrack(entry: NativeTranscript, track: NonNullable<State['video']>['tracks'][number]) {
+      if (entry.kind !== track.kind) return false;
+      const expected = normalizeNativeLanguage(track.language);
+      const actual = normalizeNativeLanguage(entry.language);
+      return actual === expected || !expected.includes('-') && actual.split('-')[0] === expected.split('-')[0];
+    }
+    function applyNativeEntry(entry: NativeTranscript, source: 'captured' | 'latest' | 'cache' | 'network', deliveredAt: number) {
+      const video = state.video;
+      if (!video || video.videoId !== entry.videoId || watchVideoId(location.href) !== entry.videoId) return false;
+      const track = matchingNativeTrack(video, entry);
+      if (!track || explicitPrimaryTrackId && explicitPrimaryTrackId !== track.id) return false;
+      if (state.status === 'loaded' && state.primaryTrackId !== track.id) return false;
+      if (state.status === 'loaded' && state.nativeTimeline?.capturedAt === entry.capturedAt) return true;
+      const payload = parsedNativeEntry(entry, track.id);
+      if (!payload) return false;
+      const { parsed, phrases } = payload;
+      const samePrimary = state.primaryTrackId === track.id;
+      gate.next(); clearPlaybackBoundary(); secondaryGeneration++;
+      explicitPrimaryTrackId = null;
+      state = { ...state, ...parsed, source: 'youtube', language: entry.language, trackId: track.id, primaryTrackId: track.id,
+        secondaryTrackId: samePrimary ? state.secondaryTrackId : null,
+        secondaryCues: samePrimary ? state.secondaryCues : [], secondaryLanguage: samePrimary ? state.secondaryLanguage : undefined,
+        secondaryStatus: samePrimary ? state.secondaryStatus : 'idle', secondaryMessage: samePrimary ? state.secondaryMessage : '',
+        phrases, status: 'loaded',
+        message: `YouTube 网页原生字幕已即时同步：${phrases.length || parsed.cues.length} 行（${track.kind === 'asr' ? '自动轨' : '人工轨'}）`,
+        nativeTimeline: { ...(entry.requestCompletedAt ? { requestCompletedAt: entry.requestCompletedAt } : {}),
+          capturedAt: entry.capturedAt, deliveredAt, source } };
+      publish();
+      return true;
+    }
+    async function consumeCaptured(message: Record<string, unknown>, deliveredAt: number) {
+      const videoId = typeof message.videoId === 'string' ? message.videoId : '';
+      const language = typeof message.language === 'string' ? message.language : '';
+      const kind = message.kind === 'manual' || message.kind === 'asr' ? message.kind : null;
+      if (!/^[\w-]{11}$/.test(videoId) || !language || !kind || watchVideoId(location.href) !== videoId) return;
+      const entry = await cachedNative(videoId, language, kind);
+      if (!entry || watchVideoId(location.href) !== videoId) return;
+      if (!state.video || state.video.videoId !== videoId) pendingCaptured = { entry, deliveredAt };
+      else applyNativeEntry(entry, 'captured', deliveredAt);
+    }
     async function refresh() {
       if (infoBusy || !clients.size) return;
       infoBusy = true;
@@ -74,38 +144,155 @@ export default defineContentScript({
         const v = r.video;
         if (state.video?.session !== v.session || JSON.stringify(state.video.tracks) !== JSON.stringify(v.tracks)
           || state.video.availability !== v.availability) {
-          // The cloud result belongs to this video/session, not the webpage's
-          // changing track list. Late player metadata must not cancel its job.
-          if (state.video?.session === v.session && state.source === 'supadata') {
-            state = { ...state, video: v }; publish(); return;
-          }
-          gate.next();
+          gate.next(); explicitPrimaryTrackId = null;
           state = { ...emptyState(), video: v, trackId: v.tracks[0]?.id ?? null, primaryTrackId: v.tracks[0]?.id,
             secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', status: 'ready',
             message: '视频已连接，正在准备字幕。' };
+          const deferred = pendingCaptured?.entry.videoId === v.videoId ? pendingCaptured : null;
+          pendingCaptured = null;
+          let latest = deferred;
+          if (!latest) {
+            const latestTask = nativeRuntime({ type: 'latest', videoId: v.videoId }).then(reply =>
+              reply.ok === true && validNativeTranscript(reply.entry) ? { entry: reply.entry, deliveredAt: Date.now() } : null);
+            latest = await Promise.race([latestTask,
+              new Promise<null>(resolve => setTimeout(() => resolve(null), 100))]);
+            if (!latest) void latestTask.then(delayed => {
+              if (delayed) applyNativeEntry(delayed.entry, 'latest', delayed.deliveredAt);
+            });
+          }
+          if (state.video?.session !== v.session || watchVideoId(location.href) !== v.videoId) return;
+          if (latest && applyNativeEntry(latest.entry, deferred ? 'captured' : 'latest', latest.deliveredAt)) return;
           publish();
         }
       } catch (error) {
         if (gate.current(token) && !state.video) { state = { ...emptyState(), status: 'error', message: (error as Error).message }; publish(); }
       } finally { infoBusy = false; }
     }
-    async function load(trackId: string) {
-      const video = state.video;
-      if (!video || !video.tracks.some(t => t.id === trackId) || state.status === 'loading') return;
-      const token = gate.next();
-      clearPlaybackBoundary();
-      state = { ...state, source: 'youtube', language: video.tracks.find(t => t.id === trackId)?.language, trackId,
-        primaryTrackId: trackId, secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', status: 'loading',
-        message: '正在请求网站原始字幕…', cues: [], eventCount: 0, controlEventCount: 0 }; publish();
+    async function nativeRuntime(payload: Record<string, unknown>) {
       try {
-        const r = await request('load', { videoId: video.videoId, session: video.session, trackId });
-        if (!gate.current(token) || watchVideoId(location.href) !== video.videoId) return;
-        if (r.videoId !== video.videoId || r.session !== video.session || r.trackId !== trackId || typeof r.body !== 'string') throw new Error('字幕响应会话不匹配');
-        const parsed = parseJson3(r.body, trackId);
-        state = { ...state, ...parsed, status: 'loaded', message: '原始条目已读取；未合并、排序、去重或自然断句' }; publish();
+        const reply: unknown = await browser.runtime.sendMessage({ channel: YOUTUBE_NATIVE_CHANNEL, version: 1, ...payload });
+        return record(reply) ? reply : { ok: false, error: '扩展后台没有返回原生字幕结果' };
       } catch (error) {
-        if (!gate.current(token)) return;
-        state = { ...state, status: 'error', message: (error as Error).message }; publish();
+        return { ok: false, error: error instanceof Error ? error.message.slice(0, 500) : '扩展后台通信失败' };
+      }
+    }
+    async function cachedNative(videoId: string, language: string, kind: NativeTrackKind) {
+      const reply = await nativeRuntime({ type: 'cache', videoId, language, kind });
+      return reply.ok === true && validNativeTranscript(reply.entry) ? reply.entry : null;
+    }
+    browser.runtime.onMessage.addListener((message, sender) => {
+      if (sender.id !== browser.runtime.id || !record(message) || message.channel !== YOUTUBE_NATIVE_CHANNEL
+        || message.version !== 1 || message.type !== 'captured') return;
+      void consumeCaptured(message, Date.now());
+    });
+    async function nativeTranscript(video: NonNullable<State['video']>, trackId: string, force: boolean) {
+      const track = video.tracks.find(item => item.id === trackId);
+      if (!track) throw new Error('所选字幕轨不存在');
+      if (!force) {
+        const cached = await cachedNative(video.videoId, track.language, track.kind);
+        if (cached && parsedNativeEntry(cached, trackId)) return { entry: cached, source: 'cache' as const };
+      }
+      const target = await request('native-target', { videoId: video.videoId, session: video.session, trackId });
+      if (target.videoId !== video.videoId || target.session !== video.session || target.trackId !== trackId
+        || typeof target.baseUrl !== 'string') throw new Error('字幕轨地址与当前视频不匹配');
+      const fetchSelectedTrack = async () => {
+        const reply = await nativeRuntime({ type: 'fetch', videoId: video.videoId, language: track.language, kind: track.kind,
+          baseUrl: target.baseUrl, client: target.client });
+        if (reply.ok !== true || !validNativeTranscript(reply.entry)) {
+          throw new Error(typeof reply.error === 'string' ? reply.error.slice(0, 500) : 'YouTube 原生字幕读取失败');
+        }
+        return { entry: reply.entry as NativeTranscript, source: 'network' as const };
+      };
+
+      // Start the selected track immediately. Capturing a page-generated token is
+      // only a parallel cold-start fallback and must never block a readable URL.
+      let settled = false;
+      const direct = fetchSelectedTrack().then(result => { settled = true; return result; });
+      void direct.catch(() => undefined);
+      const auth = await nativeRuntime({ type: 'auth-status', videoId: video.videoId, language: track.language, kind: track.kind });
+      if (auth.available === true) return direct;
+      // A locally readable selected track can settle in the same turn as the
+      // auth check. Give it that turn before touching YouTube's CC control.
+      await Promise.resolve();
+      if (settled) return direct;
+
+      const startedAt = Date.now();
+      const directWon = new Error('direct-native-track-ready');
+      const primed = (async () => {
+        let toggled = false;
+        try {
+          if (settled) throw directWon;
+          await request('prime-captions', { videoId: video.videoId, session: video.session }); toggled = true;
+          for (let attempt = 0; attempt < 14; attempt++) {
+            if (settled) throw directWon;
+            await new Promise(resolve => setTimeout(resolve, 150));
+            if (settled) throw directWon;
+            const captured = await cachedNative(video.videoId, track.language, track.kind);
+            if (captured && (!force || captured.capturedAt >= startedAt)) return { entry: captured, source: 'captured' as const };
+            const capturedAuth = await nativeRuntime({ type: 'auth-status', videoId: video.videoId,
+              language: track.language, kind: track.kind });
+            if (capturedAuth.available === true) return await fetchSelectedTrack();
+          }
+          if (settled) throw directWon;
+          return await fetchSelectedTrack();
+        } finally {
+          if (toggled) await request('restore-captions', { videoId: video.videoId, session: video.session }).catch(() => undefined);
+        }
+      })();
+      try {
+        const result = await Promise.any([direct, primed]);
+        settled = true;
+        return result;
+      } catch (error) {
+        const failures = error instanceof AggregateError ? error.errors : [error];
+        const failure = failures.find(item => item !== directWon && item instanceof Error) ?? failures[0];
+        throw failure instanceof Error ? failure : new Error('YouTube 原生字幕读取失败');
+      }
+    }
+    async function load(trackId: string, lane: 'primary' | 'secondary' = 'primary', force = false, userInitiated = false) {
+      const video = state.video;
+      const track = video?.tracks.find(item => item.id === trackId);
+      if (!video || !track || lane === 'primary' && state.status === 'loading'
+        || lane === 'secondary' && (state.status !== 'loaded' || state.secondaryStatus === 'loading')) return;
+      const samePrimary = state.primaryTrackId === trackId;
+      const token = lane === 'primary' ? gate.next() : gate.capture();
+      const secondaryToken = ++secondaryGeneration;
+      if (lane === 'primary') {
+        explicitPrimaryTrackId = userInitiated ? trackId : null;
+        clearPlaybackBoundary();
+        state = { ...state, source: 'youtube', language: track.language, trackId, primaryTrackId: trackId,
+          secondaryTrackId: samePrimary ? state.secondaryTrackId : null, secondaryCues: samePrimary ? state.secondaryCues : [],
+          secondaryStatus: samePrimary ? state.secondaryStatus : 'idle', status: 'loading', phrases: [],
+          message: force ? '正在重新获取 YouTube 原生字幕…' : '正在读取 YouTube 原生字幕…', cues: [], eventCount: 0, controlEventCount: 0 };
+      } else {
+        state = { ...state, secondaryTrackId: trackId, secondaryCues: [], secondaryStatus: 'loading',
+          secondaryMessage: '正在读取 YouTube 原生第二字幕…' };
+      }
+      publish();
+      try {
+        const result = await nativeTranscript(video, trackId, force);
+        if ((lane === 'primary' && !gate.current(token)) || secondaryGeneration !== secondaryToken
+          || watchVideoId(location.href) !== video.videoId) return;
+        if (result.entry.videoId !== video.videoId || !entryMatchesSelectedTrack(result.entry, track)
+          || result.entry.format !== 'youtube-timedtext-json3') throw new Error('原生字幕响应轨道不匹配');
+        const parsed = parseJson3(result.entry.body, trackId);
+        if (lane === 'primary') {
+          const phrases = nativeDisplayPhrases(parsed.cues);
+          state = { ...state, ...parsed, phrases, status: 'loaded',
+            message: `YouTube 原生字幕已就绪：${phrases.length || parsed.cues.length} 行（完整句分组）`,
+            nativeTimeline: { ...(result.entry.requestCompletedAt ? { requestCompletedAt: result.entry.requestCompletedAt } : {}),
+              capturedAt: result.entry.capturedAt, deliveredAt: Date.now(), source: result.source } };
+          explicitPrimaryTrackId = null;
+        } else {
+          state = { ...state, secondaryCues: parsed.cues, secondaryLanguage: result.entry.language, secondaryStatus: 'loaded',
+            secondaryMessage: `第二字幕已就绪：${parsed.cues.length} 条` };
+        }
+        publish();
+      } catch (error) {
+        if ((lane === 'primary' && !gate.current(token)) || secondaryGeneration !== secondaryToken) return;
+        if (lane === 'primary') { explicitPrimaryTrackId = null; state = { ...state, status: 'error', message: (error as Error).message }; }
+        else state = { ...state, secondaryCues: [], secondaryStatus: 'error', secondaryMessage: (error as Error).message };
+        publish();
       }
     }
     async function seek(message: Record<string, unknown>, port: Browser.runtime.Port) {
@@ -157,34 +344,6 @@ export default defineContentScript({
         report(`定位/播放未完成：${(error as Error).message}`);
       }
     }
-    async function loadWordTiming(message: Record<string, unknown>, port: Browser.runtime.Port) {
-      const v = state.video;
-      const timingLanguage = validLanguage(state.language) ? state.language : validLanguage(message.language) ? message.language : null;
-      if (!clients.has(port) || !v || state.status !== 'loaded' || state.source !== 'supadata'
-        || message.videoId !== v.videoId || message.session !== v.session || state.trackId !== `supadata:${message.requestId}`
-        || !timingLanguage || watchVideoId(location.href) !== v.videoId) return;
-      const token = gate.capture();
-      const estimatedPhrases = buildEstimatedTimedPhrases(state.cues);
-      state = { ...state, phrases: estimatedPhrases, message: '字幕与估算语段时间已就绪',
-        timingMessage: `已按 Supadata 原始时间估算 ${estimatedPhrases.length} 个自然语段；正在尝试用 YouTube 词级时间校准` };
-      publish();
-      try {
-        const r = await request('word-timing', { videoId: v.videoId, session: v.session, language: timingLanguage });
-        if (!gate.current(token) || !clients.has(port) || state.video?.session !== v.session || state.trackId !== `supadata:${message.requestId}`) return;
-        if (r.videoId !== v.videoId || r.session !== v.session || typeof r.body !== 'string') throw new Error('词级时间响应会话不匹配');
-        const phrases = buildTimedPhrases(state.cues, parseJson3WordTimings(r.body));
-        const estimatedCount = phrases.filter(phrase => phrase.timing === 'youtube-estimated').length;
-        state = { ...state, phrases, message: '字幕与独立语段时间已就绪',
-          timingMessage: estimatedCount
-            ? `已生成 ${phrases.length} 个自然语段：${phrases.length - estimatedCount} 个使用 YouTube 词时间，${estimatedCount} 个局部边界按 Supadata 原始时间估算`
-            : `已生成 ${phrases.length} 个自然语段，全部使用 YouTube 词时间` };
-      } catch {
-        if (!gate.current(token)) return;
-        state = { ...state, phrases: estimatedPhrases, message: '字幕与估算语段时间已就绪',
-          timingMessage: `YouTube 词级时间不可用；已按 Supadata 原始时间估算 ${estimatedPhrases.length} 个自然语段，标点和语义优先` };
-      }
-      publish();
-    }
     async function playbackControl(message: Record<string, unknown>, port: Browser.runtime.Port) {
       const v = state.video;
       if (!clients.has(port) || !v || message.videoId !== v.videoId || message.session !== v.session || message.trackId !== state.trackId
@@ -229,56 +388,20 @@ export default defineContentScript({
       port.onMessage.addListener(m => {
         if (!record(m) || m.version !== 1) return;
         if (m.type === 'refresh') { reset(); void refresh(); }
-        if (m.type === 'supadata-begin' && state.status !== 'loading' && state.video && m.session === state.video.session
-          && m.videoId === state.video.videoId && typeof m.requestId === 'string' && /^[\w-]{1,100}$/.test(m.requestId)) {
-          gate.next(); clearPlaybackBoundary(); state = { ...state, source: 'supadata', trackId: `supadata:${m.requestId}`,
-            primaryTrackId: typeof m.requestedTrackId === 'string' ? m.requestedTrackId : state.primaryTrackId,
-            secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', status: 'loading', cues: [],
-            eventCount: 0, controlEventCount: 0, message: '正在通过 Supadata 获取已有字幕（会使用服务额度）…' }; publish();
-        }
-        if (m.type === 'supadata-finish' && state.video && m.session === state.video.session && m.videoId === state.video.videoId
-          && watchVideoId(location.href) === state.video.videoId && state.status === 'loading' && state.trackId === `supadata:${m.requestId}`) {
-          gate.next();
-          try {
-            if (typeof m.error === 'string') throw new Error(m.error.slice(0, 500));
-            const parsed = parseSupadata(m.data);
-            state = { ...state, status: 'loaded', cues: parsed.cues, language: parsed.language, phrases: [],
-              requestedLanguage: validLanguage(m.requestedLanguage) ? m.requestedLanguage : undefined,
-              eventCount: parsed.cues.length, controlEventCount: 0,
-              message: `Supadata 已返回 ${parsed.cues.length} 条，实际语言 ${parsed.language}。正在读取网站自动轨的词级时间…` };
-          } catch (error) { state = { ...state, status: 'error', message: (error as Error).message }; }
-          publish();
-        }
-        if (m.type === 'supadata-secondary-begin' && state.video && state.status === 'loaded' && m.session === state.video.session
-          && m.videoId === state.video.videoId && typeof m.requestId === 'string' && /^[\w-]{1,100}$/.test(m.requestId)
-          && typeof m.requestedTrackId === 'string' && state.video.tracks.some(track => track.id === m.requestedTrackId)) {
-          state = { ...state, secondaryTrackId: m.requestedTrackId, secondaryCues: [], secondaryStatus: 'loading',
-            secondaryMessage: '正在通过 Supadata 获取第二字幕（会使用一次服务额度）…' }; publish();
-        }
-        if (m.type === 'supadata-secondary-finish' && state.video && state.status === 'loaded' && m.session === state.video.session
-          && m.videoId === state.video.videoId && state.secondaryStatus === 'loading' && state.secondaryTrackId === m.requestedTrackId) {
-          try {
-            if (typeof m.error === 'string') throw new Error(m.error.slice(0, 500));
-            const parsed = parseSupadata(m.data);
-            state = { ...state, secondaryCues: parsed.cues, secondaryLanguage: parsed.language, secondaryStatus: 'loaded',
-              secondaryMessage: `第二字幕已就绪：${parsed.cues.length} 条，实际语言 ${parsed.language}` };
-          } catch (error) {
-            state = { ...state, secondaryCues: [], secondaryStatus: 'error', secondaryMessage: (error as Error).message };
-          }
-          publish();
-        }
         if (m.type === 'secondary-clear' && state.video && m.session === state.video.session && m.videoId === state.video.videoId) {
-          state = { ...state, secondaryTrackId: null, secondaryCues: [], secondaryLanguage: undefined,
+          secondaryGeneration++; state = { ...state, secondaryTrackId: null, secondaryCues: [], secondaryLanguage: undefined,
             secondaryStatus: 'idle', secondaryMessage: '' }; publish();
         }
-        if (m.type === 'timing-load') void loadWordTiming(m, port);
         if (m.type === 'select' && typeof m.trackId === 'string' && m.session === state.video?.session
           && state.status !== 'loading' && state.video?.tracks.some(t => t.id === m.trackId)) {
           gate.next(); clearPlaybackBoundary(); state = { ...state, source: 'youtube', trackId: m.trackId, primaryTrackId: m.trackId,
             secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', cues: [], eventCount: 0, controlEventCount: 0,
             status: 'ready', message: '字幕轨已切换，正在准备字幕' }; publish();
         }
-        if (m.type === 'load' && typeof m.trackId === 'string' && m.session === state.video?.session) void load(m.trackId);
+        if (m.type === 'load' && typeof m.trackId === 'string' && m.session === state.video?.session) {
+          void load(m.trackId, 'primary', m.force === true, m.userInitiated === true);
+        }
+        if (m.type === 'load-secondary' && typeof m.trackId === 'string' && m.session === state.video?.session) void load(m.trackId, 'secondary', m.force === true);
         if (m.type === 'seek') void seek(m, port);
         if (m.type === 'playback-toggle' || m.type === 'playback-rate' || m.type === 'playback-mode') void playbackControl(m, port);
       });
@@ -290,7 +413,9 @@ export default defineContentScript({
     });
     ctx.addEventListener(document, 'yt-navigate-start', () => reset());
     ctx.addEventListener(document, 'yt-navigate-finish', () => { void refresh(); });
+    writeDiagnostics();
     ctx.setInterval(() => {
+      writeDiagnostics();
       if (state.video && watchVideoId(location.href) !== state.video.videoId) reset();
       void refresh();
     }, 1000);

@@ -1,9 +1,8 @@
 export const SERVICE_CHANNEL = 'ylh-service-v1';
 export type ThemeSetting = 'system' | 'light' | 'dark';
 export type DisplaySetting = 'phrases' | 'raw';
-export type PublicSettings = { hasKey: boolean; language: string; theme: ThemeSetting; displayMode: DisplaySetting };
-export type ServiceReply = { ok: boolean; error?: string; requestedLanguage?: string; settings?: PublicSettings;
-  account?: { plan: string; maxCredits: number; usedCredits: number }; data?: unknown };
+export type PublicSettings = { language: string; theme: ThemeSetting; displayMode: DisplaySetting };
+export type ServiceReply = { ok: boolean; error?: string; settings?: PublicSettings };
 
 export function trustedServiceSender(sender: { id?: string; url?: string }, extensionId: string, page: 'options' | 'sidepanel') {
   if (sender.id !== extensionId || !sender.url) return false;

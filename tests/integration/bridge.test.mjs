@@ -11,12 +11,14 @@ const contentCode = await readFile(new URL('../../.output/chrome-mv3/content-scr
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const events = () => {
   const listeners = new Set();
-  return { addListener: fn => listeners.add(fn), emit: value => { for (const fn of listeners) fn(value); } };
+  return { addListener: fn => listeners.add(fn), emit: (...values) => { for (const fn of listeners) fn(...values); } };
 };
 async function harness(t) {
   const timers = new Set();
   const connect = events();
+  const runtimeMessage = events();
   const doc = new EventTarget();
+  doc.documentElement = { dataset: {} };
   let videoId = 'abcdefghijk';
   let tracksReady = true;
   let responseBody = JSON.stringify({ events: [
@@ -28,7 +30,9 @@ async function harness(t) {
     { tStartMs: 1_000, dDurationMs: 2_000, segs: [{ utf8: 'Hola', tOffsetMs: 0 }, { utf8: ' mundo', tOffsetMs: 1_000 }] },
   ] });
   let pauseResponse = false; let releaseResponse;
-  let plays = 0; let fetched; let adShowing = false;
+  let plays = 0; let fetched; let adShowing = false; let nativeAuthAvailable = true; let nativeFetchNeedsAuth = false; let primeClicks = 0;
+  let nativeCachedEntry = null; let latestBehavior = 'normal';
+  const nativeMessages = [];
   const video = { readyState: 4, duration: 1600, currentTime: 0, paused: true, playbackRate: 1,
     play: async () => { plays++; video.paused = false; }, pause: () => { video.paused = true; } };
   const player = { getPlayerResponse: () => ({ videoDetails: { videoId, title: 'Synthetic fixture' }, playabilityStatus: { status: 'OK' },
@@ -36,13 +40,39 @@ async function harness(t) {
       { baseUrl: `/api/timedtext?v=${videoId}&lang=en`, vssId: '.en', languageCode: 'en', name: { simpleText: 'English' } },
       { baseUrl: `/api/timedtext?v=${videoId}&lang=en&kind=asr`, vssId: 'a.en', languageCode: 'en', kind: 'asr', name: { simpleText: 'English auto' } },
     ] : [] } } }) };
+  const subtitleButton = { disabled: false, pressed: false, getAttribute: name => name === 'aria-pressed' ? String(subtitleButton.pressed) : null,
+    click: () => { subtitleButton.pressed = !subtitleButton.pressed; primeClicks++; if (subtitleButton.pressed) nativeAuthAvailable = true; } };
   doc.title = 'Synthetic fixture'; doc.getElementById = () => player;
-  doc.querySelector = selector => selector.includes('ad-showing') ? (adShowing ? player : null) : video;
+  doc.querySelector = selector => selector.includes('ad-showing') ? (adShowing ? player : null)
+    : selector.includes('ytp-subtitles-button') ? subtitleButton : video;
   const location = { href: `https://www.youtube.com/watch?v=${videoId}`, origin: 'https://www.youtube.com' };
   const context = createContext({ console, URL, AbortController, CustomEvent, Event, EventTarget, document: doc, location,
     TextDecoder, crypto: { randomUUID }, setTimeout, clearTimeout,
     setInterval: (...args) => { const id = setInterval(...args); timers.add(id); return id; }, clearInterval,
-    chrome: { runtime: { id: 'test-extension', onConnect: connect, getURL: path => `chrome-extension://test-extension${path}` } },
+    chrome: { runtime: { id: 'test-extension', onConnect: connect, onMessage: runtimeMessage,
+      getURL: path => `chrome-extension://test-extension${path}`,
+      sendMessage: async message => {
+        if (message.channel !== 'ylh-youtube-native-v1') return { ok: false, error: 'unknown' };
+        nativeMessages.push(structuredClone(message));
+        if (message.type === 'latest') {
+          if (latestBehavior === 'reject') throw new Error('synthetic background unavailable');
+          if (latestBehavior === 'hang') return await new Promise(() => {});
+          return nativeCachedEntry ? { ok: true, entry: nativeCachedEntry } : { ok: false, error: 'cache-miss' };
+        }
+        if (message.type === 'cache') return nativeCachedEntry && nativeCachedEntry.videoId === message.videoId
+          && (nativeCachedEntry.language === message.language || !message.language.includes('-')
+            && nativeCachedEntry.language.split('-')[0] === message.language.split('-')[0]) && nativeCachedEntry.kind === message.kind
+          ? { ok: true, entry: nativeCachedEntry } : { ok: false, error: 'cache-miss' };
+        if (message.type === 'auth-status') return { ok: true, available: nativeAuthAvailable };
+        if (message.type === 'fetch') {
+          fetched = message.baseUrl;
+          if (nativeFetchNeedsAuth && !nativeAuthAvailable) return { ok: false, error: 'missing timedtext auth' };
+          if (!responseBody.trim()) return { ok: false, error: 'YouTube 原生字幕返回空内容' };
+          return { ok: true, entry: { videoId: message.videoId, language: message.language, kind: message.kind,
+            body: responseBody, format: 'youtube-timedtext-json3', capturedAt: Date.now() } };
+        }
+        return { ok: false, error: 'unknown' };
+      } } },
     fetch: async url => {
       fetched = url;
       if (String(url).includes('/youtubei/v1/player')) return Response.json({
@@ -69,6 +99,9 @@ async function harness(t) {
     }); };`, context);
   await runInContext(mainCode, context);
   await runInContext(contentCode, context);
+  assert.deepEqual({ ...doc.documentElement.dataset }, {
+    ylhBuild: 'sbd-sentences-v1', ylhStatus: 'waiting', ylhPhraseCount: '0', ylhUnderTwoCount: '0',
+  }, 'content script must expose its build before the side panel connects');
   const panels = [];
   const addPanel = () => {
     const messages = []; const onMessage = events(); const onDisconnect = events();
@@ -77,7 +110,8 @@ async function harness(t) {
       onMessage, onDisconnect, postMessage: m => { if (closed) throw Error('disconnected'); messages.push(structuredClone(m)); },
       disconnect: () => { closed = true; onDisconnect.emit(); } };
     connect.emit(port);
-    const panel = { messages, onMessage, disconnect: port.disconnect };
+    const panel = { messages, onMessage, disconnect: port.disconnect,
+      state: () => messages.filter(message => message.version === 1).at(-1) };
     panels.push(panel); return panel;
   };
   const { messages, onMessage, disconnect } = addPanel(); await tick();
@@ -86,7 +120,17 @@ async function harness(t) {
   const load = () => onMessage.emit({ version: 1, type: 'load', trackId: state().trackId, session: state().video.session });
   const seek = (cue, playMode = 'single') => onMessage.emit({ version: 1, type: 'seek', videoId: state().video.videoId,
     session: state().video.session, trackId: state().trackId, cueId: cue.cueId, playMode });
-  return { state, load, seek, video, messages, addPanel, disconnect, get plays() { return plays; }, get fetched() { return fetched; },
+  return { state, load, seek, video, messages, nativeMessages, diagnostics: doc.documentElement.dataset, addPanel, disconnect, get plays() { return plays; },
+    get fetched() { return fetched; }, get primeClicks() { return primeClicks; }, setNativeAuth: value => { nativeAuthAvailable = value; },
+    setNativeFetchNeedsAuth: value => { nativeFetchNeedsAuth = value; },
+    setNativeCache: entry => { nativeCachedEntry = entry; },
+    setLatestBehavior: value => { latestBehavior = value; },
+    capture: async entry => {
+      nativeCachedEntry = entry;
+      runtimeMessage.emit({ channel: 'ylh-youtube-native-v1', version: 1, type: 'captured', videoId: entry.videoId,
+        language: entry.language, kind: entry.kind }, { id: 'test-extension' });
+      await tick(); await tick();
+    },
     setAd: value => { adShowing = value; },
     holdInfo: () => { context.holdInfo = true; },
     releaseInfo: () => { runInContext('holdInfo = false; for (const response of heldInfo.splice(0)) window.postMessage(response);', context); },
@@ -114,6 +158,163 @@ test('production bridges preserve raw entries and seek a late cue on the bound v
   assert.equal(h.video.currentTime, 1300); assert.equal(h.plays, 1);
   h.select(h.state().video.tracks[1].id); await tick();
   assert.equal(h.state().cues.length, 0); assert.equal(h.state().status, 'ready');
+});
+
+test('production YouTube display restores sentences across ASR events and preserves raw cues', async t => {
+  const h = await harness(t);
+  h.setBody(JSON.stringify({ events: [
+    { tStartMs: 0, dDurationMs: 2_000, segs: [{ utf8: "It's the most famous revenge story ever" }] },
+    { tStartMs: 2_000, dDurationMs: 2_000, segs: [{ utf8: 'written.' }] },
+    { tStartMs: 4_000, dDurationMs: 1_000, segs: [{ utf8: 'How?' }] },
+    { tStartMs: 5_000, dDurationMs: 3_000, segs: [{ utf8: 'The story continues.' }] },
+  ] }));
+  h.load(); await tick(); await tick();
+  assert.equal(h.state().status, 'loaded');
+  assert.deepEqual(h.state().phrases.map(row => [row.text, row.startMs, row.endMs]), [
+    ["It's the most famous revenge story ever written.", 0, 4_000],
+    ['How? The story continues.', 4_000, 8_000],
+  ]);
+  assert.deepEqual(h.state().cues.map(cue => cue.text), [
+    "It's the most famous revenge story ever", 'written.', 'How?', 'The story continues.',
+  ]);
+  assert.deepEqual({ ...h.diagnostics }, {
+    ylhBuild: 'sbd-sentences-v1', ylhStatus: 'loaded', ylhPhraseCount: '2', ylhUnderTwoCount: '0',
+  });
+});
+
+test('production bundle merges the exact installed-real single-one and wrong fragments', async t => {
+  const h = await harness(t);
+  h.setBody(JSON.stringify({ events: [
+    { tStartMs: 4_000, dDurationMs: 2_000, segs: [{ utf8: 'And what if you were wrong about every' }] },
+    { tStartMs: 5_990, dDurationMs: 2_010, segs: [{ utf8: '\n' }] },
+    { tStartMs: 6_000, dDurationMs: 2_000, segs: [{ utf8: 'single one?' }] },
+    { tStartMs: 7_990, dDurationMs: 3_010, segs: [{ utf8: '\n' }] },
+    { tStartMs: 8_000, dDurationMs: 3_000, segs: [{ utf8: 'Think about that. Every match completely' }] },
+    { tStartMs: 10_990, dDurationMs: 1_010, segs: [{ utf8: '\n' }] },
+    { tStartMs: 11_000, dDurationMs: 1_000, segs: [{ utf8: 'wrong.' }] },
+  ] }));
+  h.load(); await tick(); await tick();
+  assert.deepEqual(h.state().phrases.map(row => [row.text, row.startMs, row.endMs]), [
+    ['And what if you were wrong about every single one?', 4_000, 8_000],
+    ['Think about that. Every match completely wrong.', 8_000, 12_000],
+  ]);
+  assert.deepEqual(h.state().cues.map(cue => cue.text), [
+    'And what if you were wrong about every', '\n', 'single one?', '\n',
+    'Think about that. Every match completely', '\n', 'wrong.',
+  ]);
+  assert.equal(h.diagnostics.ylhUnderTwoCount, '0');
+  assert.ok(h.state().phrases.every(row => row.endMs - row.startMs >= 2_000));
+});
+
+test('cold native path starts the selected track immediately instead of blocking on CC polling', async t => {
+  const h = await harness(t); h.setNativeAuth(false);
+  h.load(); await tick(); await tick();
+  assert.equal(h.state().status, 'loaded');
+  const operations = h.nativeMessages.map(message => message.type);
+  assert.ok(operations.indexOf('fetch') >= 0);
+  assert.ok(operations.indexOf('fetch') < operations.indexOf('auth-status'));
+  assert.equal(h.primeClicks, 0);
+});
+
+test('cold native fallback retries the selected track as soon as timedtext auth appears', async t => {
+  const h = await harness(t); h.setNativeAuth(false); h.setNativeFetchNeedsAuth(true);
+  const startedAt = Date.now(); h.load();
+  for (let attempt = 0; attempt < 20 && h.state().status !== 'loaded'; attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(h.state().status, 'loaded');
+  assert.ok(Date.now() - startedAt < 700, 'must not wait through the old 2.1-second body-cache loop');
+  assert.equal(h.nativeMessages.filter(message => message.type === 'fetch').length, 2);
+  assert.equal(h.primeClicks, 2, 'CC is enabled for auth capture and then restored');
+});
+
+test('captured webpage timedtext is pushed into the open panel and selects its real track', async t => {
+  const h = await harness(t);
+  const completedAt = Date.now() - 4;
+  await h.capture({ videoId: h.state().video.videoId, language: 'en', kind: 'asr',
+    body: JSON.stringify({ events: [{ tStartMs: 900, dDurationMs: 2_400, segs: [{ utf8: 'Captured immediately.' }] }] }),
+    format: 'youtube-timedtext-json3', requestCompletedAt: completedAt, capturedAt: Date.now() - 2 });
+  assert.equal(h.state().status, 'loaded');
+  assert.equal(h.state().video.tracks.find(track => track.id === h.state().primaryTrackId).kind, 'asr');
+  assert.equal(h.state().cues[0].text, 'Captured immediately.');
+  assert.equal(h.state().nativeTimeline.source, 'captured');
+  assert.equal(h.state().nativeTimeline.requestCompletedAt, completedAt);
+  assert.equal(h.nativeMessages.some(message => message.type === 'fetch'), false);
+});
+
+test('panel reconnect consumes latest captured timedtext before requesting a selected track', async t => {
+  const h = await harness(t); h.disconnect(); await tick();
+  h.setNativeCache({ videoId: 'abcdefghijk', language: 'en', kind: 'manual',
+    body: JSON.stringify({ events: [{ tStartMs: 2_000, dDurationMs: 2_100, segs: [{ utf8: 'Latest cache first.' }] }] }),
+    format: 'youtube-timedtext-json3', requestCompletedAt: Date.now() - 5, capturedAt: Date.now() - 3 });
+  const panel = h.addPanel(); await tick(); await tick();
+  assert.equal(panel.state().status, 'loaded');
+  assert.equal(panel.state().cues[0].text, 'Latest cache first.');
+  assert.equal(panel.state().nativeTimeline.source, 'latest');
+  assert.equal(h.nativeMessages.filter(message => message.type === 'fetch').length, 0);
+  assert.ok(h.nativeMessages.some(message => message.type === 'latest'));
+});
+
+test('a rejected latest-cache query cannot strand the panel before automatic native loading', async t => {
+  const h = await harness(t); h.disconnect(); await tick(); h.setLatestBehavior('reject');
+  const panel = h.addPanel(); await tick(); await tick();
+  assert.equal(panel.state().status, 'ready');
+  panel.onMessage.emit({ version: 1, type: 'load', trackId: panel.state().trackId,
+    videoId: panel.state().video.videoId, session: panel.state().video.session });
+  await tick(); await tick();
+  assert.equal(panel.state().status, 'loaded');
+  assert.ok(panel.state().cues.length > 0);
+});
+
+test('a hung latest-cache query falls back to ready state instead of leaving the panel without subtitles', async t => {
+  const h = await harness(t); h.disconnect(); await tick(); h.setLatestBehavior('hang');
+  const panel = h.addPanel();
+  await new Promise(resolve => setTimeout(resolve, 130));
+  assert.equal(panel.state().status, 'ready');
+  panel.onMessage.emit({ version: 1, type: 'load', trackId: panel.state().trackId,
+    videoId: panel.state().video.videoId, session: panel.state().video.session });
+  await tick(); await tick();
+  assert.equal(panel.state().status, 'loaded');
+});
+
+test('a malformed latest cache entry is ignored and the selected track is fetched normally', async t => {
+  const h = await harness(t); h.disconnect(); await tick();
+  h.setNativeCache({ videoId: 'abcdefghijk', language: 'en', kind: 'manual', body: '{not-json',
+    format: 'youtube-timedtext-json3', capturedAt: Date.now() });
+  const panel = h.addPanel(); await tick(); await tick();
+  assert.equal(panel.state().status, 'ready');
+  panel.onMessage.emit({ version: 1, type: 'load', trackId: panel.state().trackId,
+    videoId: panel.state().video.videoId, session: panel.state().video.session });
+  await tick(); await tick();
+  assert.equal(panel.state().status, 'loaded');
+  assert.ok(h.nativeMessages.some(message => message.type === 'fetch'));
+});
+
+test('a unique regional cache entry satisfies a broad selected language without a false track-mismatch error', async t => {
+  const h = await harness(t); h.disconnect(); await tick(); h.setLatestBehavior('reject');
+  h.setNativeCache({ videoId: 'abcdefghijk', language: 'en-US', kind: 'manual',
+    body: JSON.stringify({ events: [{ tStartMs: 0, dDurationMs: 2_000, segs: [{ utf8: 'Regional cache works.' }] }] }),
+    format: 'youtube-timedtext-json3', capturedAt: Date.now() });
+  const panel = h.addPanel(); await tick(); await tick();
+  panel.onMessage.emit({ version: 1, type: 'load', trackId: panel.state().trackId,
+    videoId: panel.state().video.videoId, session: panel.state().video.session });
+  await tick(); await tick();
+  assert.equal(panel.state().status, 'loaded');
+  assert.equal(panel.state().cues[0].text, 'Regional cache works.');
+  assert.equal(panel.state().language, 'en');
+});
+
+test('YouTube native primary and secondary tracks stay independent without a paid provider request', async t => {
+  const h = await harness(t); h.load(); await tick();
+  const primaryTrack = h.state().trackId;
+  const primaryCues = structuredClone(h.state().cues);
+  const secondaryTrack = h.state().video.tracks[1];
+  h.setBody(JSON.stringify({ events: [{ tStartMs: 1500, dDurationMs: 600, segs: [{ utf8: 'Native secondary.' }] }] }));
+  h.send({ version: 1, type: 'load-secondary', trackId: secondaryTrack.id,
+    videoId: h.state().video.videoId, session: h.state().video.session });
+  await tick();
+  assert.equal(h.state().source, 'youtube'); assert.equal(h.state().trackId, primaryTrack);
+  assert.deepEqual(h.state().cues, primaryCues);
+  assert.equal(h.state().secondaryTrackId, secondaryTrack.id);
+  assert.equal(h.state().secondaryCues[0].text, 'Native secondary.');
 });
 test('playback state follows the bound player and controls update the real video element', async t => {
   const h = await harness(t);
@@ -143,85 +344,8 @@ test('YouTube does not publish invalid media clock values to the side panel', as
   assert.equal(h.messages.filter(message => message.type === 'playback-state').length, count);
 });
 
-test('word timing follows the actual Supadata response language rather than the requested fallback label', async t => {
-  const h = await harness(t);
-  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'actual-language' };
-  h.send({ ...binding, type: 'supadata-begin' });
-  h.send({ ...binding, type: 'supadata-finish', requestedLanguage: 'en', data: {
-    lang: 'es', content: [{ offset: 1_000, duration: 2_000, text: 'Hola mundo.' }],
-  } });
-  h.send({ ...binding, type: 'timing-load', language: 'en' });
-  for (let i = 0; i < 50 && h.state().phrases?.[0]?.timing !== 'youtube-word'; i++) await tick();
-  assert.equal(new URL(h.fetched).searchParams.get('lang'), 'es');
-  assert.equal(h.state().phrases[0].text, 'Hola mundo.');
-  assert.equal(h.state().phrases[0].startMs, 1_000);
-});
-test('production timing keeps punctuation and semantic phrases ahead of the six-second target', async t => {
-  const h = await harness(t);
-  const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
-  const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
-  const text = `${first} ${second}`, firstTokens = first.match(/[A-Za-z]+/g), secondTokens = second.match(/[A-Za-z]+|100/g);
-  const firstDuration = firstTokens.length * 350, secondDuration = secondTokens.length * 625;
-  // Model a real rolling-ASR overlap: the first event continues beyond its
-  // final word even though the next event begins at the next sentence.
-  h.setWordBody(JSON.stringify({ events: [
-    { tStartMs: 0, dDurationMs: firstDuration + 1_500,
-      segs: firstTokens.map((word, index) => ({ utf8: `${index ? ' ' : ''}${word}`, tOffsetMs: index * 350 })) },
-    { tStartMs: firstDuration, dDurationMs: secondDuration,
-      segs: secondTokens.map((word, index) => ({ utf8: `${index ? ' ' : ''}${word}`, tOffsetMs: index * 625 })) },
-  ] }));
-  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'sbd-two-five' };
-  h.send({ ...binding, type: 'supadata-begin' });
-  h.send({ ...binding, type: 'supadata-finish', requestedLanguage: 'en', data: { lang: 'en', content: [
-    { offset: 0, duration: 5_000, text: `${first} Today, I am` },
-    { offset: 5_000, duration: firstDuration + secondDuration - 5_000, text: second.replace(/^Today, I am\s*/, '') },
-  ] } });
-  h.send({ ...binding, type: 'timing-load', language: 'en' });
-  for (let i = 0; i < 50 && /正在尝试/.test(h.state().timingMessage ?? ''); i++) await tick();
-  assert.equal(h.state().phrases[0].text, first);
-  assert.equal(h.state().phrases[0].endMs, firstDuration);
-  assert.equal(h.state().phrases[1].text, 'Today, I am very excited to help you pronounce 100 everyday words');
-  assert.ok(h.state().phrases[1].endMs - h.state().phrases[1].startMs > 6_000);
-  assert.ok(h.state().phrases.every(phrase => phrase.endMs - phrase.startMs >= 2_000
-    && phrase.endMs - phrase.startMs <= 10_000));
-  assert.equal(h.state().phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), text.replace(/\s/g, ''));
-});
-test('failed YouTube word alignment still publishes 2-second-minimum SBD phrases from Supadata timing', async t => {
-  const h = await harness(t);
-  const first = 'Hello, lovely students, and welcome to your pronunciation training session.';
-  const second = 'Today, I am very excited to help you pronounce 100 everyday words in my Modern Received Pronunciation accent.';
-  h.setWordBody(JSON.stringify({ events: [{ tStartMs: 0, dDurationMs: 2_000, segs: [
-    { utf8: 'completely', tOffsetMs: 0 }, { utf8: ' unrelated', tOffsetMs: 1_000 },
-  ] }] }));
-  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'estimated-two-five' };
-  h.send({ ...binding, type: 'supadata-begin' });
-  h.send({ ...binding, type: 'supadata-finish', requestedLanguage: 'en', data: { lang: 'en', content: [
-    { offset: 0, duration: 5_000, text: `${first} Today, I am` },
-    { offset: 5_000, duration: 6_600, text: second.replace(/^Today, I am\s*/, '') },
-  ] } });
-  h.send({ ...binding, type: 'timing-load', language: 'en' });
-  for (let i = 0; i < 50 && /正在尝试/.test(h.state().timingMessage ?? ''); i++) await tick();
-  assert.equal(h.state().phrases[0].text, first);
-  assert.equal(h.state().phrases[1].text, 'Today, I am very excited to help you pronounce 100 everyday words');
-  assert.equal(h.state().phrases[2].text, 'in my Modern Received Pronunciation accent.');
-  assert.ok(h.state().phrases[1].endMs - h.state().phrases[1].startMs > 5_000);
-  assert.ok(h.state().phrases.every(phrase => phrase.timing === 'youtube-estimated'));
-  assert.ok(h.state().phrases.every(phrase => {
-    const duration = phrase.endMs - phrase.startMs;
-    return duration >= 2_000 && duration <= 6_000;
-  }));
-  assert.doesNotMatch(h.state().timingMessage, /词级时间读取失败|保留原字幕/);
-  assert.match(h.state().timingMessage, /词级时间不可用.*估算/);
-  assert.equal(h.state().phrases.map(phrase => phrase.text).join(' ').replace(/\s/g, ''), `${first} ${second}`.replace(/\s/g, ''));
-  const target = h.state().phrases[1];
-  h.send({ version: 1, type: 'seek', phraseId: target.id, playMode: 'single',
-    videoId: h.state().video.videoId, session: h.state().video.session });
-  await tick();
-  assert.equal(h.video.currentTime, target.startMs / 1_000);
-  assert.equal(h.plays, 1);
-});
 test('single, loop, and all playback modes enforce Enjoy-compatible segment boundaries', async t => {
-  const h = await harness(t); providerCues(h, [1_000, 2_000, 3_000]);
+  const h = await harness(t); await nativeCues(h, [1_000, 2_000, 3_000]);
   const [single, loop, all] = h.state().cues;
 
   h.seek(single, 'single'); await tick();
@@ -246,7 +370,7 @@ test('single, loop, and all playback modes enforce Enjoy-compatible segment boun
 });
 
 test('YouTube follow mode pauses at a sentence end and can advance immediately to the next sentence', async t => {
-  const h = await harness(t); providerCues(h, [1_000, 3_000]);
+  const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
   const [first, second] = h.state().cues;
   h.seek(first, 'follow'); await tick();
   h.video.currentTime = first.endMs / 1000;
@@ -258,35 +382,8 @@ test('YouTube follow mode pauses at a sentence end and can advance immediately t
   assert.equal(h.video.paused, false);
 });
 
-test('YouTube keeps a paid secondary subtitle lane independent from primary cues and timing', async t => {
-  const h = await harness(t);
-  const primary = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session,
-    requestId: 'primary-lane', requestedTrackId: h.state().video.tracks[0].id };
-  h.send({ ...primary, type: 'supadata-begin' });
-  h.send({ ...primary, type: 'supadata-finish', requestedLanguage: 'en', data: { lang: 'en', content: [
-    { offset: 1_000, duration: 2_000, text: 'Primary sentence.' },
-  ] } });
-  const primaryTrackId = h.state().trackId;
-  const primaryCues = structuredClone(h.state().cues);
-  const secondaryTrack = h.state().video.tracks[1];
-  const secondary = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session,
-    requestId: 'secondary-lane', requestedTrackId: secondaryTrack.id };
-  h.send({ ...secondary, type: 'supadata-secondary-begin' });
-  h.send({ ...secondary, type: 'supadata-secondary-finish', requestedLanguage: 'zh-Hans', data: { lang: 'zh-CN', content: [
-    { offset: 900, duration: 2_300, text: '第二字幕。' },
-  ] } });
-  assert.equal(h.state().trackId, primaryTrackId);
-  assert.deepEqual(h.state().cues, primaryCues);
-  assert.equal(h.state().secondaryTrackId, secondaryTrack.id);
-  assert.equal(h.state().secondaryLanguage, 'zh-CN');
-  assert.equal(h.state().secondaryCues[0].text, '第二字幕。');
-  h.send({ version: 1, type: 'secondary-clear', videoId: h.state().video.videoId, session: h.state().video.session });
-  assert.equal(h.state().secondaryTrackId, null);
-  assert.deepEqual(h.state().secondaryCues, []);
-});
-
 test('switching YouTube subtitle track cancels the previous loop boundary', async t => {
-  const h = await harness(t); providerCues(h, [1_000, 2_000]);
+  const h = await harness(t); await nativeCues(h, [1_000, 2_000]);
   const phrase = h.state().cues[0];
   h.seek(phrase, 'loop'); await tick();
   h.select(h.state().video.tracks[1].id); await tick();
@@ -297,7 +394,7 @@ test('switching YouTube subtitle track cancels the previous loop boundary', asyn
 });
 
 test('a rejected YouTube play clears its pending segment boundary and reports without an unhandled rejection', async t => {
-  const h = await harness(t); providerCues(h, [1_000]);
+  const h = await harness(t); await nativeCues(h, [1_000]);
   h.video.play = async () => { throw new Error('synthetic autoplay rejection'); };
   h.seek(h.state().cues[0], 'loop'); await tick();
   assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /未完成/);
@@ -308,7 +405,7 @@ test('a rejected YouTube play clears its pending segment boundary and reports wi
 });
 
 test('YouTube clamps a segment end to media duration before enforcing single playback', async t => {
-  const h = await harness(t); providerCues(h, [1_000]);
+  const h = await harness(t); await nativeCues(h, [1_000]);
   h.video.duration = 1.2;
   h.seek(h.state().cues[0], 'single'); await tick();
   h.video.currentTime = 1.21;
@@ -318,7 +415,7 @@ test('YouTube clamps a segment end to media duration before enforcing single pla
 });
 
 test('switching from a loop pause to continuous mode resumes immediately instead of remaining stuck', async t => {
-  const h = await harness(t); providerCues(h, [1_000]); const cue = h.state().cues[0];
+  const h = await harness(t); await nativeCues(h, [1_000]); const cue = h.state().cues[0];
   h.seek(cue, 'loop'); await tick(); h.video.currentTime = cue.endMs / 1000 + .01;
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, true);
@@ -327,7 +424,7 @@ test('switching from a loop pause to continuous mode resumes immediately instead
 });
 
 test('a rejected YouTube loop resume stops cleanly without an unhandled promise rejection', async t => {
-  const h = await harness(t); providerCues(h, [1_000]); const cue = h.state().cues[0];
+  const h = await harness(t); await nativeCues(h, [1_000]); const cue = h.state().cues[0];
   let calls = 0;
   h.video.play = async () => { calls++; if (calls > 1) throw new Error('synthetic loop resume rejection'); h.video.paused = false; };
   h.seek(cue, 'loop'); await tick(); h.video.currentTime = cue.endMs / 1000 + .01;
@@ -346,47 +443,17 @@ test('a late previous-video response cannot overwrite a new video', async t => {
   await h.navigate('lmnopqrstuv'); h.release(); await tick();
   assert.equal(h.state().video.videoId, 'lmnopqrstuv'); assert.equal(h.state().cues.length, 0); assert.equal(h.state().status, 'ready');
 });
-test('Supadata provider data is explicitly labeled and supports bound-video seek', async t => {
-  const h = await harness(t);
-  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'request-1' };
-  h.send({ ...binding, type: 'supadata-begin' });
-  const bilingualText = 'Hello, students.\n同学们，你们好。';
-  h.send({ ...binding, type: 'supadata-finish', requestedLanguage: 'en-GB', data: { lang: 'en', content: [{ offset: 1234, duration: 500, text: bilingualText }] } });
-  assert.equal(h.state().source, 'supadata'); assert.equal(h.state().cues[0].startMs, 1234);
-  assert.equal(h.state().requestedLanguage, 'en-GB'); assert.equal(h.state().language, 'en');
-  assert.equal(h.state().cues[0].text, bilingualText);
-  h.seek(h.state().cues[0]); await tick(); assert.equal(h.video.currentTime, 1.234);
-});
-test('Supadata result for an old session is discarded after navigation', async t => {
-  const h = await harness(t);
-  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'request-2' };
-  h.send({ ...binding, type: 'supadata-begin' }); await h.navigate('lmnopqrstuv');
-  h.send({ ...binding, type: 'supadata-finish', data: { lang: 'en', content: [{ offset: 100, duration: 10, text: 'old' }] } });
-  assert.equal(h.state().video.videoId, 'lmnopqrstuv'); assert.equal(h.state().cues.length, 0);
-});
-test('Supadata can start without webpage tracks and survives their later arrival', async t => {
-  const h = await harness(t); await h.updateTracks(false);
-  assert.equal(h.state().video.tracks.length, 0);
-  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: 'request-late-tracks' };
-  h.send({ ...binding, type: 'supadata-begin' });
-  await h.updateTracks(true);
-  assert.equal(h.state().status, 'loading'); assert.equal(h.state().trackId, 'supadata:request-late-tracks');
-  h.send({ ...binding, type: 'supadata-finish', data: { lang: 'en', content: [{ offset: 1_200_125, duration: 375, text: '>> unchanged' }] } });
+async function nativeCues(h, offsets = [1_234, 630_125, 1_250_875]) {
+  h.setBody(JSON.stringify({ events: offsets.map((offset, index) => ({ tStartMs: offset, dDurationMs: 375,
+    segs: [{ utf8: `synthetic position ${index}` }] })) }));
+  const binding = { videoId: h.state().video.videoId, session: h.state().video.session };
+  h.load(); await tick(); await tick();
   assert.equal(h.state().status, 'loaded');
-  await h.updateTracks(false); assert.equal(h.state().cues.length, 1);
-  h.seek(h.state().cues[0]); await tick(); assert.equal(h.video.currentTime, 1200.125);
-});
-
-function providerCues(h, offsets = [1_234, 630_125, 1_250_875]) {
-  const binding = { version: 1, videoId: h.state().video.videoId, session: h.state().video.session, requestId: randomUUID() };
-  h.send({ ...binding, type: 'supadata-begin' });
-  h.send({ ...binding, type: 'supadata-finish', data: { lang: 'en', content: offsets.map((offset, i) =>
-    ({ offset, duration: 375, text: `synthetic position ${i}` })) } });
   return binding;
 }
 
 test('synthetic front/middle/end clicks preserve milliseconds and reject ads or out-of-range times', async t => {
-  const h = await harness(t); h.video.duration = 1261; providerCues(h, [1234, 630125, 1250875, 1262000]);
+  const h = await harness(t); h.video.duration = 1261; await nativeCues(h, [1234, 630125, 1250875, 1262000]);
   for (const cue of h.state().cues.slice(0, 3)) {
     h.seek(cue); await tick(); assert.equal(h.video.currentTime, cue.startMs / 1000);
   }
@@ -398,13 +465,12 @@ test('synthetic front/middle/end clicks preserve milliseconds and reject ads or 
 });
 
 test('SPA navigation during pending seek drops the old operation, including A-B-A navigation', async t => {
-  const h = await harness(t); const binding = providerCues(h);
+  const h = await harness(t); const binding = await nativeCues(h);
   h.holdInfo(); h.seek(h.state().cues[0]); await tick();
   await h.navigate('lmnopqrstuv'); h.releaseInfo(); await tick();
   assert.equal(h.plays, 0); assert.equal(h.state().cues.length, 0);
   await h.navigate('abcdefghijk');
   assert.notEqual(h.state().video.session, binding.session);
-  h.send({ ...binding, type: 'supadata-finish', data: { lang: 'en', content: [{ offset: 0, duration: 100, text: 'stale' }] } });
   assert.equal(h.state().cues.length, 0);
 });
 
@@ -415,28 +481,27 @@ test('YouTube navigation cancels a hung page handshake and starts the new video 
   h.releaseInfo(); await tick(); assert.equal(h.state().video.videoId, 'lmnopqrstuv');
 });
 
-test('two simulated tabs on the same video reject each other\'s seek and provider results', async t => {
+test('two simulated tabs on the same video reject each other\'s seek bindings', async t => {
   const a = await harness(t), b = await harness(t);
-  const bindingA = providerCues(a); const bindingB = providerCues(b);
+  const bindingA = await nativeCues(a); const bindingB = await nativeCues(b);
   assert.notEqual(bindingA.session, bindingB.session);
   b.send({ version: 1, type: 'seek', videoId: bindingA.videoId, session: bindingA.session,
     trackId: a.state().trackId, cueId: a.state().cues[0].cueId });
   await tick(); assert.equal(a.plays, 0); assert.equal(b.plays, 0);
   a.seek(a.state().cues[2]); await tick(); assert.equal(a.plays, 1); assert.equal(b.video.currentTime, 0);
   b.seek(b.state().cues[1]); await tick(); assert.equal(b.plays, 1); assert.equal(a.video.currentTime, 1250.875);
-  b.send({ ...bindingA, type: 'supadata-finish', data: { lang: 'en', content: [] } });
   assert.equal(b.state().status, 'loaded'); assert.equal(b.state().cues.length, 3);
 });
 
 test('disconnecting the requesting panel cancels its pending seek even with another panel connected', async t => {
-  const h = await harness(t); providerCues(h); h.addPanel(); await tick();
+  const h = await harness(t); await nativeCues(h); h.addPanel(); await tick();
   h.holdInfo(); h.seek(h.state().cues[0]); await tick();
   h.disconnect(); h.releaseInfo(); await tick();
   assert.equal(h.plays, 0); assert.equal(h.video.currentTime, 0);
 });
 
 test('play rejection after panel disconnect does not send to the closed port or the other panel', async t => {
-  const h = await harness(t); providerCues(h);
+  const h = await harness(t); await nativeCues(h);
   const other = h.addPanel(); await tick();
   let rejectPlay;
   h.video.play = () => new Promise((_, reject) => { rejectPlay = reject; });

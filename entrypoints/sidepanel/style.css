@@ -117,6 +117,9 @@ button:focus-visible, [role="option"]:focus-visible, [role="menuitem"]:focus-vis
 .echo-progress { width: 100%; height: 7px; margin: 25px 0 11px; overflow: hidden; border-radius: 999px; background: var(--echo-line); }.echo-progress span { display: block; width: 62%; height: 100%; border-radius: inherit; background: var(--echo-text); animation: echo-progress 1.3s ease-in-out infinite alternate; }
 .echo-load-card small { color: var(--echo-faint); font-size: 10px; }.echo-message-card { min-height: 300px; }.echo-state-icon { width: 54px; height: 54px; margin-bottom: 20px; display: grid; place-items: center; border-radius: 50%; background: var(--echo-soft); color: var(--echo-muted); font-size: 18px; font-weight: 700; }.echo-state-icon.failed { background: #fee2e2; color: #dc2626; }
 .echo-primary { width: 100%; min-height: 42px; margin-top: 22px; border: 0; border-radius: 10px; background: var(--echo-text); color: var(--echo-bg); font-size: 13px; }
+.echo-message-actions { width: 100%; display: grid; gap: 9px; margin-top: 22px; }
+.echo-message-actions .echo-primary { margin-top: 0; }
+.echo-secondary-action { min-height: 42px; border: 1px solid var(--echo-border); border-radius: 10px; background: var(--echo-bg); color: var(--echo-text); font-size: 12px; }
 
 @keyframes echo-spin { to { transform: rotate(360deg); } } @keyframes echo-progress { from { transform: translateX(-25%); } to { transform: translateX(60%); } }
 @keyframes echo-fade { from { opacity: 0; } } @keyframes echo-rise { from { opacity: 0; transform: translateY(8px); } }

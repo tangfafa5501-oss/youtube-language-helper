@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { groupSentences, rawCaptionGroups } from '../lib/sentence-groups.ts';
-import { parseSupadata } from '../lib/supadata.ts';
+import type { RawCue } from '../lib/captions.ts';
 
 function fixture(rows: [string, number, number][]) {
-  return parseSupadata({ lang: 'en', content: rows.map(([text, offset, duration]) => ({ text, offset, duration })) }).cues;
+  return rows.map<RawCue>(([text, offset, duration], sourceIndex) => ({ cueId: `fixture:${sourceIndex}`,
+    sourceIndex, text, startMs: offset, endMs: duration > 0 ? offset + duration : null,
+    timingSource: 'offset+duration', timingIssue: duration > 0 ? null : 'duration 非法',
+    raw: { text, offset, duration } }));
 }
 
 test('SBD crosses raw cue boundaries, protects abbreviations, and preserves all source text and times', () => {

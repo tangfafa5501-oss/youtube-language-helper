@@ -1,24 +1,145 @@
 import { record, watchVideoId } from '../lib/captions';
 import { SERVICE_CHANNEL, trustedServiceSender, type PublicSettings, type ServiceReply } from '../lib/settings';
-import { SUPADATA_ORIGIN, SupadataError, fetchSupadata, testSupadata, validLanguage } from '../lib/supadata';
+import { YOUTUBE_NATIVE_CACHE_KEY, YOUTUBE_NATIVE_CHANNEL, applyNativeAuth, boundedNativeCache, chooseNativeTranscript,
+  observedTimedText, timedTextFormat, validNativeTranscript, type NativeAuth, type NativeTrackKind,
+  type NativeTranscript } from '../lib/youtube-native';
 
 export default defineBackground(() => {
   // Fail closed: do not save/read a secret unless content-script access is off.
   const protectedStorage = browser.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).then(() => true, () => false);
-  const active = new Map<string, { controller: AbortController; tabId?: number; videoId?: string }>();
-  const storageKey = 'supadata-v1';
-  const validKey = (value: unknown): value is string => typeof value === 'string' && /^[\x21-\x7e]{8,512}$/.test(value);
-  async function settings() {
-    if (!await protectedStorage) throw new SupadataError('无法限制密钥存储访问，已停止');
-    const result = (await browser.storage.local.get(storageKey))[storageKey];
-    return { key: record(result) && validKey(result.key) ? result.key : '',
-      language: record(result) && validLanguage(result.language) ? result.language : 'en',
-      theme: record(result) && (result.theme === 'light' || result.theme === 'dark') ? result.theme : 'system',
-      displayMode: record(result) && result.displayMode === 'raw' ? 'raw' : 'phrases' } as const;
+  const settingsKey = 'settings-v2';
+  const legacySettingsKey = 'supadata-v1';
+  const nativeAuth = new Map<string, NativeAuth>();
+  let nativeCache: NativeTranscript[] = [];
+  const nativeCacheReady = (async () => {
+    try {
+      const stored = (await browser.storage.session.get(YOUTUBE_NATIVE_CACHE_KEY))[YOUTUBE_NATIVE_CACHE_KEY];
+      nativeCache = boundedNativeCache(Array.isArray(stored) ? stored : []);
+    } catch { nativeCache = []; }
+  })();
+  async function saveNativeTranscript(entry: NativeTranscript) {
+    await nativeCacheReady;
+    nativeCache = boundedNativeCache([entry, ...nativeCache]);
+    try { await browser.storage.session.set({ [YOUTUBE_NATIVE_CACHE_KEY]: nativeCache }); } catch { /* Memory cache still works. */ }
   }
-  const publicSettings = (config: Awaited<ReturnType<typeof settings>>): PublicSettings => ({
-    hasKey: Boolean(config.key), language: config.language, theme: config.theme, displayMode: config.displayMode,
+  async function boundedText(response: Response) {
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('YouTube 字幕没有响应体');
+    const decoder = new TextDecoder(); let body = '', size = 0;
+    while (true) {
+      const chunk = await reader.read(); if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > 8_000_000) { await reader.cancel(); throw new Error('YouTube 字幕响应过大'); }
+      body += decoder.decode(chunk.value, { stream: true });
+    }
+    body += decoder.decode();
+    if (!body.trim()) throw new Error('YouTube 原生字幕返回空内容');
+    return body;
+  }
+  async function boundYouTubeTab(tabId: number, videoId: string) {
+    const tab = await browser.tabs.get(tabId);
+    if (!tab.url || watchVideoId(tab.url) !== videoId) throw new Error('标签页视频已切换，旧字幕已丢弃');
+    return tab;
+  }
+  async function fetchNative(url: string, tabId: number, videoId: string, language: string, kind: NativeTrackKind,
+    requestCompletedAt?: number) {
+    await boundYouTubeTab(tabId, videoId);
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 12_000);
+    try {
+      const response = await fetch(url, { credentials: 'include', redirect: 'error', cache: 'force-cache', signal: controller.signal });
+      if (!response.ok) throw new Error(`YouTube 原生字幕请求失败：HTTP ${response.status}`);
+      const body = await boundedText(response);
+      await boundYouTubeTab(tabId, videoId);
+      const entry: NativeTranscript = { videoId, language, kind, body, format: timedTextFormat(body),
+        ...(requestCompletedAt ? { requestCompletedAt } : {}), capturedAt: Date.now() };
+      await saveNativeTranscript(entry);
+      return entry;
+    } finally { clearTimeout(timeout); }
+  }
+  const trustedYouTubeSender = async (sender: Browser.runtime.MessageSender, videoId: string) => {
+    if (sender.id !== browser.runtime.id || !Number.isInteger(sender.tab?.id)
+      || (sender.frameId !== undefined && sender.frameId !== 0)) return null;
+    try { await boundYouTubeTab(sender.tab!.id!, videoId); return sender.tab!.id!; } catch { return null; }
+  };
+
+  browser.webRequest?.onCompleted.addListener(details => {
+    if (details.tabId < 0 || details.statusCode < 200 || details.statusCode >= 300) return;
+    const observed = observedTimedText(details.url); if (!observed) return;
+    void (async () => {
+      try {
+        await boundYouTubeTab(details.tabId, observed.videoId);
+        if (observed.pot || observed.potc) nativeAuth.set(observed.videoId,
+          { pot: observed.pot, potc: observed.potc, capturedAt: Date.now() });
+        const target = new URL(observed.url); target.searchParams.set('fmt', 'json3');
+        const entry = await fetchNative(target.href, details.tabId, observed.videoId, observed.language, observed.kind,
+          details.timeStamp);
+        await browser.tabs.sendMessage(details.tabId, { channel: YOUTUBE_NATIVE_CHANNEL, version: 1, type: 'captured',
+          videoId: entry.videoId, language: entry.language, kind: entry.kind }).catch(() => undefined);
+      } catch { /* Page bridge can still request the selected track explicitly. */ }
+    })();
+  }, { urls: ['https://www.youtube.com/api/timedtext*'] });
+
+  browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!record(message) || message.channel !== YOUTUBE_NATIVE_CHANNEL || message.version !== 1) return;
+    const respond = async () => {
+      if (typeof message.videoId !== 'string' || !/^[\w-]{11}$/.test(message.videoId)) throw new Error('原生字幕请求参数异常');
+      const tabId = await trustedYouTubeSender(sender, message.videoId);
+      if (tabId === null) throw new Error('拒绝未绑定当前视频的原生字幕请求');
+      if (message.type === 'latest') {
+        await nativeCacheReady;
+        const entry = nativeCache.filter(item => item.videoId === message.videoId)
+          .sort((left, right) => right.capturedAt - left.capturedAt)[0];
+        return entry ? { ok: true, entry } : { ok: false, error: 'cache-miss' };
+      }
+      if (!validLanguage(message.language) || (message.kind !== 'manual' && message.kind !== 'asr')) {
+        throw new Error('原生字幕请求参数异常');
+      }
+      const kind = message.kind as NativeTrackKind;
+      if (message.type === 'cache') {
+        await nativeCacheReady;
+        const entry = chooseNativeTranscript(nativeCache, message.videoId, message.language, kind);
+        return entry ? { ok: true, entry } : { ok: false, error: 'cache-miss' };
+      }
+      if (message.type === 'auth-status') {
+        const auth = nativeAuth.get(message.videoId);
+        return { ok: true, available: Boolean(auth && Date.now() - auth.capturedAt <= 10 * 60_000) };
+      }
+      if (message.type !== 'fetch' || typeof message.baseUrl !== 'string') throw new Error('未知原生字幕操作');
+      const target = applyNativeAuth(message.baseUrl, message.videoId, nativeAuth.get(message.videoId) ?? null, message.client);
+      if (!target) throw new Error('字幕地址未通过 YouTube 来源校验');
+      const entry = await fetchNative(target, tabId, message.videoId, message.language, kind);
+      if (!validNativeTranscript(entry)) throw new Error('原生字幕响应结构异常');
+      return { ok: true, entry };
+    };
+    void respond().then(sendResponse, error => sendResponse({ ok: false,
+      error: error instanceof Error && error.name === 'AbortError' ? 'YouTube 原生字幕请求超时' : error instanceof Error ? error.message : '原生字幕请求失败' }));
+    return true;
   });
+  const validLanguage = (value: unknown): value is string => typeof value === 'string'
+    && /^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/.test(value);
+  let settingsInFlight: Promise<PublicSettings> | null = null;
+  async function readSettings() {
+    if (!await protectedStorage) throw new Error('无法读取扩展本地设置');
+    const stored = await browser.storage.local.get([settingsKey, legacySettingsKey]);
+    const current = record(stored[settingsKey]) ? stored[settingsKey] : record(stored[legacySettingsKey]) ? stored[legacySettingsKey] : {};
+    const config: PublicSettings = {
+      language: validLanguage(current.language) ? current.language : 'en',
+      theme: current.theme === 'light' || current.theme === 'dark' ? current.theme : 'system',
+      displayMode: 'phrases',
+    };
+    if (!record(stored[settingsKey]) || current.displayMode !== 'phrases') await browser.storage.local.set({ [settingsKey]: config });
+    if (stored[legacySettingsKey] !== undefined) {
+      await browser.storage.local.remove(legacySettingsKey);
+      await browser.permissions.remove({ origins: ['https://api.supadata.ai/*'] }).catch(() => false);
+    }
+    return config;
+  }
+  async function settings() {
+    if (settingsInFlight) return settingsInFlight;
+    const task = readSettings(); settingsInFlight = task;
+    try { return await task; } finally { if (settingsInFlight === task) settingsInFlight = null; }
+  }
+  void settings().catch(() => undefined);
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!record(message) || message.channel !== SERVICE_CHANNEL || message.version !== 1) return;
     const fromOptions = trustedServiceSender(sender, browser.runtime.id, 'options');
@@ -26,76 +147,21 @@ export default defineBackground(() => {
     if (!fromOptions && !fromPanel) { sendResponse({ ok: false, error: '拒绝非设置页/侧边栏的服务请求' }); return; }
     const respond = async (): Promise<ServiceReply> => {
       const config = await settings();
-      if (message.type === 'settings') return { ok: true, settings: publicSettings(config) };
+      if (message.type === 'settings') return { ok: true, settings: config };
       if (message.type === 'save-preferences') {
         const theme: PublicSettings['theme'] | null = message.theme === 'light' || message.theme === 'dark' || message.theme === 'system' ? message.theme : null;
-        const displayMode: PublicSettings['displayMode'] | null = message.displayMode === 'raw' || message.displayMode === 'phrases' ? message.displayMode : null;
-        if (!theme || !displayMode) throw new SupadataError('外观设置格式不正确');
-        const next = { ...config, theme, displayMode };
-        await browser.storage.local.set({ [storageKey]: next });
-        return { ok: true, settings: publicSettings(next) };
+        const displayMode: PublicSettings['displayMode'] | null = message.displayMode === 'phrases' ? 'phrases' : null;
+        const language = typeof message.language === 'string' ? message.language.trim() : config.language;
+        if (!theme || !displayMode || !validLanguage(language)) throw new Error('设置格式不正确');
+        const next: PublicSettings = { language, theme, displayMode };
+        await browser.storage.local.set({ [settingsKey]: next });
+        return { ok: true, settings: next };
       }
-      if (message.type === 'save' || message.type === 'delete') {
-        if (message.type === 'delete') {
-          for (const task of active.values()) task.controller.abort();
-          const next = { ...config, key: '' };
-          await browser.storage.local.set({ [storageKey]: next });
-          await browser.permissions.remove({ origins: [SUPADATA_ORIGIN] }).catch(() => false);
-          return { ok: true, settings: publicSettings(next) };
-        }
-        const language = typeof message.language === 'string' ? message.language.trim() : '';
-        if (!validLanguage(language) || typeof message.key !== 'string') throw new SupadataError('Key 或语言格式不正确');
-        if (typeof message.key !== 'string' || message.key.length > 512) throw new SupadataError('请输入有效 Key（不含空白字符）');
-        const key = message.key.trim() || config.key;
-        if (!validKey(key)) throw new SupadataError('请输入有效 Key（不含空白字符）');
-        for (const task of active.values()) task.controller.abort();
-        const next = { ...config, key, language };
-        await browser.storage.local.set({ [storageKey]: next });
-        return { ok: true, settings: publicSettings(next) };
-      }
-      if (message.type !== 'test' && message.type !== 'transcript') throw new SupadataError('未知服务操作');
-      if (message.type === 'transcript' && !fromPanel) throw new SupadataError('服务操作来源不匹配');
-      if (!config.key) throw new SupadataError('请先在 API 设置中填写并保存 Supadata Key');
-      if (!await browser.permissions.contains({ origins: [SUPADATA_ORIGIN] })) throw new SupadataError('请在 API 设置中测试连接并允许 Supadata 域名访问');
-      let videoId = '';
-      let requestedLanguage = config.language;
-      const purpose = message.purpose === 'secondary' ? 'secondary' : 'primary';
-      const operation = message.type === 'test' ? 'test' : `tab:${message.tabId}:${purpose}`;
-      if (message.type === 'transcript') {
-        if (message.language !== undefined) {
-          if (!validLanguage(message.language)) throw new SupadataError('字幕请求语言非法');
-          requestedLanguage = message.language;
-        }
-        if (!Number.isInteger(message.tabId) || Number(message.tabId) <= 0 || typeof message.videoId !== 'string') throw new SupadataError('视频绑定参数异常');
-        const tab = await browser.tabs.get(message.tabId as number);
-        if (!tab.url || watchVideoId(tab.url) !== message.videoId) throw new SupadataError('标签页视频已切换，未发送请求');
-        videoId = message.videoId;
-      }
-      if (active.has(operation)) throw new SupadataError('已有请求进行中，请勿重复点击');
-      const controller = new AbortController();
-      active.set(operation, { controller, ...(message.type === 'transcript' ? { tabId: message.tabId as number, videoId } : {}) });
-      const timeout = setTimeout(() => controller.abort(), message.type === 'test' ? 15_000 : 90_000);
-      try {
-        if (message.type === 'test') return { ok: true, account: await testSupadata(config.key, controller.signal) };
-        const result = await fetchSupadata(videoId, requestedLanguage, config.key, controller.signal);
-        const tab = await browser.tabs.get(message.tabId as number);
-        if (!tab.url || watchVideoId(tab.url) !== videoId) throw new SupadataError('视频已切换，服务结果已丢弃');
-        return { ok: true, data: result.data, requestedLanguage };
-      } finally {
-        clearTimeout(timeout);
-        if (active.get(operation)?.controller === controller) active.delete(operation);
-      }
+      throw new Error('未知设置操作');
     };
     void respond().then(sendResponse, error => sendResponse({ ok: false,
-      error: error instanceof SupadataError ? error.message : '服务请求失败或超时，请检查网络后手动重试（不会自动重新提交）' }));
+      error: error instanceof Error ? error.message : '设置操作失败' }));
     return true;
-  });
-  browser.tabs.onRemoved.addListener(tabId => {
-    for (const [key, task] of active) if (key.startsWith(`tab:${tabId}:`)) task.controller.abort();
-  });
-  browser.tabs.onUpdated.addListener((tabId, change) => {
-    for (const [key, task] of active) if (key.startsWith(`tab:${tabId}:`) && task.videoId && typeof change.url === 'string'
-      && watchVideoId(change.url) !== task.videoId) task.controller.abort();
   });
   browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {
     console.warn('Video Language Helper: side panel setup failed');
