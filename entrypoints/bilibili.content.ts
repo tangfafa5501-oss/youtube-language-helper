@@ -1,18 +1,15 @@
 import { biliCues, biliMetadata, biliPhrases, biliTracks, biliVideo, chooseBiliPair, isBiliTrack, type BiliTrack } from '../lib/bilibili';
-import { PORT, emptyState, followPauseMs, isPlaybackRate, type PlayMode, type State, type Track } from '../lib/protocol';
+import { PrecisePlaybackController, type PlaybackBoundary } from '../lib/playback-machine';
+import { PORT, emptyState, isPlaybackRate, type PlayMode, type State, type Track } from '../lib/protocol';
 import { record } from '../lib/captions';
 
 export default defineContentScript({
   matches: ['https://www.bilibili.com/video/*', 'https://www.bilibili.com/list/*'], runAt: 'document_idle',
   main(ctx) {
     const BILI_CHANNEL = 'ylh-bilibili-page-v1';
-    type Boundary = { startMs: number; endMs: number };
     const clients = new Set<Browser.runtime.Port>();
     const urls = new Map<string, BiliTrack>();
     let state: State = emptyState(), locationKey = '', loadingKey = '', settledKey = '', refreshGeneration = 0, controller: AbortController | null = null;
-    let active: { owner: Browser.runtime.Port; startMs: number; endMs: number; mode: PlayMode; generation: number;
-      looping: boolean; waiting: boolean; queue: Boundary[] } | null = null;
-    let generation = 0;
     async function pageMetadataTracks(current: { bvid: string; page: number }) {
       const requestId = crypto.randomUUID();
       return await new Promise<{ metadata: Awaited<ReturnType<typeof biliMetadata>>; tracks: BiliTrack[]; needLogin: boolean } | null>((resolve, reject) => {
@@ -40,24 +37,68 @@ export default defineContentScript({
     }
     const videoElement = () => document.querySelector<HTMLVideoElement>('.bpx-player-video-wrap video, #bilibili-player video, video');
     const publish = () => { for (const port of clients) try { port.postMessage(state); } catch { clients.delete(port); } };
-    const playback = () => {
+    const publishPlayback = () => {
       const binding = state.video;
       const video = videoElement();
       const current = biliVideo(location.href);
       if (!binding || !current || `${current.bvid}:p${current.page}` !== settledKey || !video || video.readyState === 0
         || !Number.isFinite(video.currentTime) || video.currentTime < 0 || !Number.isFinite(video.playbackRate) || video.playbackRate <= 0) return;
+      const machine = playback.state;
       const message = { type: 'playback-state', videoId: binding.videoId, session: binding.session, trackId: state.trackId,
-        currentTimeMs: Math.round(video.currentTime * 1000), playing: !video.paused, rate: video.playbackRate };
+        currentTimeMs: Math.round(video.currentTime * 1000), playing: !video.paused, rate: video.playbackRate, playMode: playback.mode,
+        ...(machine.mode !== 'auto' && machine.phase !== 'idle'
+          ? {
+              playbackPhase: machine.phase,
+              segmentStartMs: machine.segment.startMs,
+              segmentEndMs: machine.segment.endMs,
+              ...(machine.mode === 'manual'
+                ? { manualStartMs: machine.segment.startMs, manualEndMs: machine.segment.endMs }
+                : { shadowingStartMs: machine.segment.startMs, shadowingEndMs: machine.segment.endMs }),
+              ...(machine.mode === 'shadowing' && machine.phase === 'waiting'
+                ? { shadowingWaitMs: machine.waitDurationMs, shadowingResumeAtMs: machine.resumeAtMs } : {}),
+            } : {}) };
       for (const port of clients) try { port.postMessage(message); } catch { clients.delete(port); }
     };
+    const playback = new PrecisePlaybackController<Browser.runtime.Port>({
+      getVideo: videoElement,
+      ownerActive: owner => clients.has(owner),
+      onState: () => publishPlayback(),
+      onBrake: (_owner, report) => {
+        const root = document.documentElement;
+        if (!root) return;
+        root.dataset.ylhBrakeMode = report.mode;
+        root.dataset.ylhBrakeTrigger = report.trigger;
+        root.dataset.ylhBrakePollIntervalMs = String(report.pollIntervalMs);
+        root.dataset.ylhBrakeLeadMs = String(report.leadMs);
+        root.dataset.ylhBrakePollTicks = String(report.pollTicks);
+        root.dataset.ylhBrakeTargetMs = report.segment.endMs.toFixed(3);
+        root.dataset.ylhBrakeDetectedMs = report.detectedMs.toFixed(3);
+        root.dataset.ylhBrakePausedMs = report.pausedMs.toFixed(3);
+        root.dataset.ylhBrakeActualMs = report.actualMs.toFixed(3);
+        root.dataset.ylhBrakeDriftMs = report.driftMs.toFixed(3);
+      },
+      onShadowingCycle: (owner, report) => {
+        const root = document.documentElement;
+        if (root) {
+          root.dataset.ylhShadowingExpectedWaitMs = report.expectedWaitMs.toFixed(3);
+          root.dataset.ylhShadowingActualWaitMs = report.actualWaitMs.toFixed(3);
+          root.dataset.ylhShadowingWaitErrorMs = report.waitErrorMs.toFixed(3);
+          root.dataset.ylhShadowingBoundaryErrorMs = report.boundaryErrorMs.toFixed(3);
+        }
+        if (clients.has(owner)) try {
+          owner.postMessage({ type: 'shadowing-cycle', videoId: state.video?.videoId, session: state.video?.session,
+            trackId: state.trackId, ...report });
+        } catch { /* disconnected */ }
+      },
+    });
     const reset = (message = '正在读取 B 站视频…') => {
-      controller?.abort(); controller = null; active = null; generation++; urls.clear();
+      controller?.abort(); controller = null; playback.clear('auto'); urls.clear();
       state = { ...emptyState(), message }; publish();
     };
     async function loadTracks(primary: BiliTrack, secondary: BiliTrack | undefined, session: string) {
       if (state.video?.session !== session) return;
       controller?.abort(); const request = new AbortController(); controller = request;
-      active = null; generation++;
+      playback.clear('auto');
       state = { ...state, status: 'loading', trackId: primary.id, primaryTrackId: primary.id, secondaryTrackId: secondary?.id ?? null,
         secondaryStatus: secondary ? 'loading' : 'idle', secondaryMessage: secondary ? `正在读取 ${secondary.name}` : '',
         source: 'bilibili', language: primary.language, secondaryLanguage: secondary?.language,
@@ -127,22 +168,23 @@ export default defineContentScript({
           videoId: info.videoId, session: info.session, trackId: state.trackId }); } catch { /* disconnected */ }
         return;
       }
-      const mode: PlayMode = message.playMode === 'loop' || message.playMode === 'all' || message.playMode === 'follow' ? message.playMode : 'single';
+      const navigation = message.intent === 'previous' || message.intent === 'next' || message.intent === 'replay';
+      const mode: PlayMode = navigation ? 'manual'
+        : message.playMode === 'shadowing' ? 'shadowing'
+          : message.playMode === 'manual' ? 'manual' : 'auto';
       const boundedEnd = typeof endMs === 'number' ? Math.min(endMs, video.duration * 1000) : endMs;
-      const token = ++generation;
+      if (typeof boundedEnd !== 'number' || boundedEnd <= startMs) return;
       const rows = phrase ? state.phrases ?? [] : state.cues;
       const rowIndex = rows.findIndex(item => item === (phrase ?? cue));
-      const queue = rows.slice(rowIndex + 1).flatMap(item => item.startMs !== null && item.endMs !== null && item.endMs > item.startMs
+      const queue: PlaybackBoundary[] = rows.slice(rowIndex + 1).flatMap(item => item.startMs !== null && item.endMs !== null && item.endMs > item.startMs
         ? [{ startMs: item.startMs, endMs: Math.min(item.endMs, video.duration * 1000) }] : []);
-      active = typeof boundedEnd === 'number' && boundedEnd > startMs
-        ? { owner: port, startMs, endMs: boundedEnd, mode, generation: token, looping: false, waiting: false, queue } : null;
-      video.currentTime = startMs / 1000;
       const report = (text: string) => { if (clients.has(port)) try { port.postMessage({ type: 'playback', message: text,
         videoId: info.videoId, session: info.session, trackId: state.trackId }); } catch { /* disconnected */ } };
-      try { await video.play(); report(`已定位至 ${(startMs / 1000).toFixed(3)} 秒并请求播放`); }
-      catch {
-        if (active?.generation === token) { active = null; generation++; }
-        report('已定位，播放被浏览器拦截');
+      try {
+        const result = await playback.seek(port, { startMs, endMs: boundedEnd }, queue, mode);
+        report(`精准定位完成：目标 ${(result.requestedMs / 1000).toFixed(3)} 秒，实际 ${(result.actualMs / 1000).toFixed(3)} 秒，误差 ${result.errorMs.toFixed(1)}ms`);
+      } catch (error) {
+        report(`定位/播放未完成：${error instanceof Error ? error.message : '播放被浏览器拦截'}`);
       }
     }
     async function control(message: Record<string, unknown>, port: Browser.runtime.Port) {
@@ -153,24 +195,22 @@ export default defineContentScript({
         || message.videoId !== binding.videoId || message.session !== binding.session || message.trackId !== state.trackId) return;
       try {
         if (message.type === 'playback-toggle') {
-          if (active?.owner === port && active.mode === 'follow' && active.waiting) {
-            const next = active.queue[0];
-            if (!next) { active = null; generation++; }
-            else {
-              active = { ...active, ...next, queue: active.queue.slice(1), waiting: false, generation: ++generation };
-              video.currentTime = next.startMs / 1000; await video.play();
-            }
-          } else if (video.paused) await video.play(); else video.pause();
+          await playback.toggle(port);
         }
         if (message.type === 'playback-rate' && isPlaybackRate(message.rate)) video.playbackRate = message.rate;
-        if (message.type === 'playback-mode' && (message.mode === 'single' || message.mode === 'loop' || message.mode === 'all' || message.mode === 'follow') && active?.owner === port) {
-          const previous = active;
-          if (previous.waiting && message.mode === 'all') {
-            active = null; generation++; await video.play();
-          } else if (video.currentTime * 1000 >= previous.endMs) { active = null; generation++; }
+        if (message.type === 'playback-mode' && (message.mode === 'auto' || message.mode === 'manual' || message.mode === 'shadowing')) {
+          if (message.mode === 'auto') await playback.setMode('auto', port);
           else {
-            active = { ...previous, mode: message.mode, generation: ++generation, looping: false, waiting: false };
-            if (previous.looping && message.mode === 'all' && video.paused) await video.play();
+            const rows = state.phrases ?? [];
+            let rowIndex = -1;
+            for (let index = 0; index < rows.length; index++) {
+              const row = rows[index]!;
+              if (video.currentTime * 1000 >= row.startMs && video.currentTime * 1000 < row.endMs
+                && (rowIndex < 0 || row.startMs >= rows[rowIndex]!.startMs)) rowIndex = index;
+            }
+            const row = rows[rowIndex];
+            const queue = rows.slice(rowIndex + 1).map(item => ({ startMs: item.startMs, endMs: item.endMs }));
+            if (!row || !await playback.arm(port, row, queue, message.mode)) await playback.setMode(message.mode, port);
           }
         }
       } catch { if (clients.has(port)) try { port.postMessage({ type: 'playback', message: '播放被浏览器拦截',
@@ -191,54 +231,10 @@ export default defineContentScript({
         }
         if (message.type === 'playback-toggle' || message.type === 'playback-rate' || message.type === 'playback-mode') void control(message, port);
       });
-      port.onDisconnect.addListener(() => { clients.delete(port); if (active?.owner === port) { active = null; generation++; } });
+      port.onDisconnect.addListener(() => { clients.delete(port); if (playback.owns(port)) playback.clear('auto'); });
     });
     ctx.setInterval(() => { const current = biliVideo(location.href); const key = current ? `${current.bvid}:p${current.page}` : ''; if (key !== locationKey) void refresh(); }, 500);
-    ctx.setInterval(playback, 250);
-    ctx.setInterval(() => {
-      const item = active, video = videoElement();
-      if (!item || !video || item.mode === 'all' || item.looping || item.waiting || video.paused || video.currentTime * 1000 < item.endMs) return;
-      video.pause();
-      if (item.mode === 'follow') {
-        item.waiting = true; playback();
-        const token = item.generation;
-        setTimeout(() => {
-          const latest = active;
-          if (!latest || latest.generation !== token || latest.mode !== 'follow' || !latest.waiting || !clients.has(latest.owner)) return;
-          const next = latest.queue[0];
-          if (!next) {
-            const owner = latest.owner; active = null; generation++;
-            if (clients.has(owner) && state.video) try { owner.postMessage({ type: 'playback', message: '逐句跟读已完成最后一句',
-              videoId: state.video.videoId, session: state.video.session, trackId: state.trackId }); } catch { /* disconnected */ }
-            return;
-          }
-          const nextGeneration = ++generation;
-          active = { ...latest, ...next, queue: latest.queue.slice(1), generation: nextGeneration, waiting: false };
-          video.currentTime = next.startMs / 1000;
-          void video.play().catch(() => {
-            const failed = active;
-            if (!failed || failed.generation !== nextGeneration) return;
-            const owner = failed.owner; active = null; generation++;
-            if (clients.has(owner) && state.video) try { owner.postMessage({ type: 'playback', message: '逐句跟读恢复播放被浏览器拦截，已停止',
-              videoId: state.video.videoId, session: state.video.session, trackId: state.trackId }); } catch { /* disconnected */ }
-          });
-        }, followPauseMs(item.startMs, item.endMs));
-        return;
-      }
-      video.currentTime = item.startMs / 1000;
-      if (item.mode === 'single') { playback(); return; }
-      item.looping = true; const token = item.generation;
-      setTimeout(() => {
-        if (active?.generation !== token || active.mode !== 'loop') return;
-        void video.play().then(() => { if (active?.generation === token) active.looping = false; }, () => {
-          const failed = active;
-          if (!failed || failed.generation !== token) return;
-          const owner = failed.owner; active = null; generation++;
-          if (clients.has(owner) && state.video) try { owner.postMessage({ type: 'playback', message: '循环恢复播放被浏览器拦截，已停止循环',
-            videoId: state.video.videoId, session: state.video.session, trackId: state.trackId }); } catch { /* disconnected */ }
-        });
-      }, 500);
-    }, 50);
-    ctx.onInvalidated(() => { refreshGeneration++; controller?.abort(); for (const port of clients) port.disconnect(); clients.clear(); });
+    ctx.setInterval(publishPlayback, 250);
+    ctx.onInvalidated(() => { refreshGeneration++; controller?.abort(); playback.destroy(); for (const port of clients) port.disconnect(); clients.clear(); });
   },
 });

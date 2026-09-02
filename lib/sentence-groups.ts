@@ -1,7 +1,6 @@
 import sbd from 'sbd';
 import type { RawCue } from './captions.ts';
 
-const MAX_SHORT_MERGE_GAP_MS = 1_500;
 const MAX_SBD_RUN_TEXT = 500_000;
 
 export type CaptionGroup = {
@@ -79,24 +78,7 @@ function groupRun(cues: RawCue[]): CaptionGroup[] {
   }
   if (first < cues.length) append(cues.slice(first), '末尾按原条目时间保留');
 
-  // Only a <2s sentence joins its successor. An exact two-second sentence is
-  // already within the accepted range; an isolated final short sentence stays.
-  const merged: CaptionGroup[] = [];
-  for (let i = 0; i < groups.length; i++) {
-    const current = groups[i]!;
-    const members = [...current.cues];
-    let endMs = current.endMs, notice = current.notice;
-    while (i + 1 < groups.length && current.startMs !== null && endMs !== null
-      && endMs - current.startMs < 2000
-      && groups[i + 1]!.startMs !== null && groups[i + 1]!.startMs! - endMs <= MAX_SHORT_MERGE_GAP_MS) {
-      const next = groups[++i]!;
-      for (const cue of next.cues) members.push(cue);
-      endMs = next.endMs === null ? null : Math.max(endMs, next.endMs);
-      notice ??= next.notice;
-    }
-    merged.push(members.length === current.cues.length ? current : group(members, notice));
-  }
-  return merged;
+  return groups;
 }
 
 export function groupSentences(cues: RawCue[]): CaptionGroup[] {

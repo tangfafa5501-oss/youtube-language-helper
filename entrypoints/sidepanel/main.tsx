@@ -5,10 +5,10 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Popover from '@radix-ui/react-popover';
 import * as Select from '@radix-ui/react-select';
 import * as Slider from '@radix-ui/react-slider';
-import { ArrowLeft, BookOpen, Check, ChevronDown, CircleHelp, Keyboard, Languages, ListRestart, Mic, MoreVertical,
-  Pause, Play, RefreshCw, Repeat2, Settings, SkipBack, SkipForward, X } from 'lucide-react';
+import { ArrowLeft, BookOpen, Check, ChevronDown, CircleHelp, Keyboard, Languages, Mic, MoreVertical,
+  Pause, Play, RefreshCw, Settings, SkipBack, SkipForward, X } from 'lucide-react';
 import { SettingsView } from '../../components/settings-view';
-import { adjacentPlaybackRate, PLAYER_SHORTCUTS, PLAYBACK_RATES, PORT, emptyState, type State, type Track } from '../../lib/protocol';
+import { adjacentPlaybackRate, PLAYER_SHORTCUTS, PLAYBACK_RATES, PORT, emptyState, type PlayMode, type State, type Track } from '../../lib/protocol';
 import { connectPanel } from '../../lib/panel-connection';
 import { record } from '../../lib/captions';
 import { SERVICE_CHANNEL, type PublicSettings, type ServiceReply } from '../../lib/settings';
@@ -63,7 +63,7 @@ const SHORTCUT_SECTIONS = [
 const GUIDE_STEPS = [
   ['选择字幕', '顶部左侧分别选择主字幕和第二字幕。第二字幕只读取视频实际提供的轨道，不自动翻译。'],
   ['选择语段', '点击任一语段即可定位。A、S、D 分别对应上一句、重播和下一句。'],
-  ['逐句跟读', '按 E 或底部播放模式按钮开启。每句结束后按该句时长暂停，再自动播放下一句。'],
+  ['逐句跟读', '按 E 或底部【逐句跟读】开启。每句结束后会留出与刚播放语句等长的练习时间，然后自动播放下一句。'],
   ['播放速度', '点击底部倍速按钮打开滑块；Shift 加逗号或句号也可减速、加速。'],
   ['后续功能', '书本按钮预留听写；麦克风按钮预留录音和评分。当前点击会明确提示尚未开放。'],
 ] as const;
@@ -127,7 +127,7 @@ function App() {
   const [connection, setConnection] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(1);
-  const [playMode, setPlayMode] = useState<'all' | 'follow'>('all');
+  const [playMode, setPlayMode] = useState<PlayMode>('auto');
   const [currentTimeMs, setCurrentTimeMs] = useState<number | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -135,6 +135,7 @@ function App() {
   const desiredSecondaryRef = useRef<string | null>(null);
   const connectionRef = useRef<ReturnType<typeof connectPanel> | null>(null);
   const viewRef = useRef({ videoId: '', session: '', track: '' });
+  const phraseRowsRef = useRef<NonNullable<State['phrases']>>([]);
 
   useEffect(() => {
     let active = true;
@@ -156,7 +157,7 @@ function App() {
       handshake: value => record(value) && value.version === 1 && typeof value.status === 'string',
       reset: (message, error) => {
         setState({ ...emptyState(), status: error ? 'error' : 'waiting', message }); setPlayback(''); setSelected('');
-        setCurrentTimeMs(null); setPlaying(false); setRate(1); setPlayMode('all');
+        setCurrentTimeMs(null); setPlaying(false); setRate(1); setPlayMode('auto');
         autoRequestedSessionRef.current = ''; desiredSecondaryRef.current = null;
         viewRef.current = { videoId: '', session: '', track: '' };
       },
@@ -165,16 +166,28 @@ function App() {
         if (value.type === 'playback' && typeof value.message === 'string') {
           if (matchesPlaybackBinding(value, viewRef.current)) setPlayback(value.message); return;
         }
+        if (value.type === 'shadowing-cycle' && typeof value.expectedWaitMs === 'number' && typeof value.actualWaitMs === 'number') {
+          if (matchesPlaybackBinding(value, viewRef.current)) setPlayback(`逐句跟读：等待 ${value.actualWaitMs.toFixed(0)}ms（目标 ${value.expectedWaitMs.toFixed(0)}ms）后已自动播放下一句`);
+          return;
+        }
         if (value.type === 'playback-state' && typeof value.currentTimeMs === 'number') {
           if (!matchesPlaybackBinding(value, viewRef.current)) return;
           setCurrentTimeMs(value.currentTimeMs); if (typeof value.playing === 'boolean') setPlaying(value.playing);
-          if (typeof value.rate === 'number') setRate(value.rate); return;
+          if (typeof value.rate === 'number') setRate(value.rate);
+          if (value.playMode === 'auto' || value.playMode === 'manual' || value.playMode === 'shadowing') setPlayMode(value.playMode);
+          const segmentStartMs = value.playMode === 'manual' ? value.manualStartMs
+            : value.playMode === 'shadowing' ? value.shadowingStartMs : undefined;
+          if (typeof segmentStartMs === 'number') {
+            const active = phraseRowsRef.current.find(row => row.startMs === segmentStartMs);
+            if (active) setSelected(active.id);
+          }
+          return;
         }
         const message = value as unknown as State;
         if (message.version !== 1) return;
         const next = { videoId: message.video?.videoId ?? '', session: message.video?.session ?? '', track: message.trackId ?? '' };
         if (viewRef.current.session !== next.session || viewRef.current.track !== next.track || message.status !== 'loaded') {
-          setSelected(''); setPlayback(''); setCurrentTimeMs(null); setPlaying(false); setRate(1); setPlayMode('all');
+          setSelected(''); setPlayback(''); setCurrentTimeMs(null); setPlaying(false); setRate(1); setPlayMode('auto');
         }
         viewRef.current = next; setState({ ...message, tabId });
       },
@@ -193,6 +206,7 @@ function App() {
   const primaryBusy = state.status === 'loading';
   const secondaryBusy = state.secondaryStatus === 'loading';
   const phraseRows = state.phrases ?? [];
+  phraseRowsRef.current = phraseRows;
   const echoRows = useMemo<EchoRow[]>(() => {
     // The learning list has one invariant: it renders the sentence-level rows produced by
     // the content script. Raw ASR events remain in state for diagnostics and seeking, but
@@ -238,7 +252,8 @@ function App() {
 
   const selectedIndex = echoRows.findIndex(item => item.id === selected);
   const playingIndex = activeTimedRowIndex(echoRows, currentTimeMs);
-  const activeIndex = currentTimeMs === null ? selectedIndex : playingIndex;
+  const boundedWaiting = !playing && playMode !== 'auto' && selectedIndex >= 0;
+  const activeIndex = boundedWaiting ? selectedIndex : playingIndex >= 0 ? playingIndex : !playing ? selectedIndex : -1;
   const activeId = echoRows[activeIndex]?.id ?? '';
   const navigationIndex = activeIndex >= 0 ? activeIndex : selectedIndex;
   const previousIndex = navigationIndex < 0 ? -1 : adjacentPlayableRowIndex(echoRows, navigationIndex, -1);
@@ -252,19 +267,35 @@ function App() {
     if (bounds.top < 58 || bounds.bottom > innerHeight - 58) element.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }, [activeId]);
 
-  const activateEchoRow = (index: number) => {
+  const activateEchoRow = (index: number, intent: 'select' | 'previous' | 'next' | 'replay' | 'shadowing' = 'select') => {
     const item = echoRows[index]; if (!item || item.startMs === null || item.endMs === null || item.endMs <= item.startMs) return;
-    setCurrentTimeMs(null); setSelected(item.id); setPlayback(''); setPlaying(true);
+    const requestedMode: PlayMode = intent === 'previous' || intent === 'next' || intent === 'replay' ? 'manual'
+      : intent === 'shadowing' ? 'shadowing' : playMode;
+    if (requestedMode !== playMode) setPlayMode(requestedMode);
+    setCurrentTimeMs(null); setSelected(item.id); setPlayback('');
     connectionRef.current?.send({ version: 1, type: 'seek', ...('phraseId' in item ? { phraseId: item.phraseId } : { cueId: item.cueId }),
-      playMode, videoId: video?.videoId, session: video?.session, trackId: state.trackId });
+      playMode: requestedMode, intent, videoId: video?.videoId, session: video?.session, trackId: state.trackId });
   };
   const togglePlayback = () => {
-    if (selectedIndex < 0 && activeIndex < 0) activateEchoRow(nextIndex);
-    else { setPlaying(value => !value); connectionRef.current?.send({ version: 1, type: 'playback-toggle', videoId: video?.videoId, session: video?.session, trackId: state.trackId }); }
+    if (playMode !== 'auto') {
+      setPlayMode('auto'); setPlayback('自动连续播放已开启');
+      connectionRef.current?.send({ version: 1, type: 'playback-toggle', videoId: video?.videoId, session: video?.session, trackId: state.trackId });
+    }
+    else if (selectedIndex < 0 && activeIndex < 0) activateEchoRow(nextIndex);
+    else connectionRef.current?.send({ version: 1, type: 'playback-toggle', videoId: video?.videoId, session: video?.session, trackId: state.trackId });
   };
-  const setPlaybackMode = (mode: 'all' | 'follow') => {
+  const setPlaybackMode = (mode: PlayMode) => {
     setPlayMode(mode); connectionRef.current?.send({ version: 1, type: 'playback-mode', mode, videoId: video?.videoId, session: video?.session, trackId: state.trackId });
-    setPlayback(mode === 'follow' ? '逐句跟读已开启：每句结束后按本句时长暂停，再自动播放下一句 (E)' : '连续播放已开启 (E)');
+    setPlayback(mode === 'manual' ? '手动按句模式：将在当前句尾暂停'
+      : mode === 'shadowing' ? '逐句跟读已开启：每句后自动留出等长练习时间 (E)' : '自动连续播放已开启 (E)');
+  };
+  const toggleShadowing = () => {
+    if (playMode === 'shadowing') { setPlaybackMode('auto'); return; }
+    const index = navigationIndex >= 0 ? navigationIndex : nextIndex;
+    if (index >= 0) {
+      setPlayMode('shadowing'); setPlayback('逐句跟读已开启：每句后自动留出等长练习时间 (E)');
+      activateEchoRow(index, 'shadowing');
+    } else setPlaybackMode('shadowing');
   };
   const setPlaybackRate = (next: number) => {
     if (next === rate || !(PLAYBACK_RATES as readonly number[]).includes(next)) return;
@@ -305,10 +336,10 @@ function App() {
       if (event.shiftKey && event.code === PLAYER_SHORTCUTS.increaseRate) { event.preventDefault(); changeRate(1); return; }
       if (event.shiftKey) return;
       if (event.code === PLAYER_SHORTCUTS.playOrPause || event.code === 'KeyK') { event.preventDefault(); togglePlayback(); }
-      else if (event.code === PLAYER_SHORTCUTS.previous && previousIndex >= 0) { event.preventDefault(); activateEchoRow(previousIndex); }
-      else if (event.code === PLAYER_SHORTCUTS.replay && navigationIndex >= 0) { event.preventDefault(); activateEchoRow(navigationIndex); }
-      else if (event.code === PLAYER_SHORTCUTS.next && nextIndex >= 0) { event.preventDefault(); activateEchoRow(nextIndex); }
-      else if (event.code === PLAYER_SHORTCUTS.toggleEcho) { event.preventDefault(); setPlaybackMode(playMode === 'follow' ? 'all' : 'follow'); }
+      else if (event.code === PLAYER_SHORTCUTS.previous && previousIndex >= 0) { event.preventDefault(); activateEchoRow(previousIndex, 'previous'); }
+      else if (event.code === PLAYER_SHORTCUTS.replay && navigationIndex >= 0) { event.preventDefault(); activateEchoRow(navigationIndex, 'replay'); }
+      else if (event.code === PLAYER_SHORTCUTS.next && nextIndex >= 0) { event.preventDefault(); activateEchoRow(nextIndex, 'next'); }
+      else if (event.code === PLAYER_SHORTCUTS.toggleEcho) { event.preventDefault(); toggleShadowing(); }
       else if ([PLAYER_SHORTCUTS.toggleDictation, PLAYER_SHORTCUTS.record, PLAYER_SHORTCUTS.playRecording, 'KeyV'].includes(event.code as never)) { event.preventDefault(); reserved('听写或跟读录音'); }
     };
     addEventListener('keydown', onKey); return () => removeEventListener('keydown', onKey);
@@ -316,7 +347,8 @@ function App() {
 
   if (view === 'settings') return <SettingsView onBack={() => setView('reader')} onSettings={next => { setSettings(next); applyTheme(next.theme); }}/>
 
-  if (echoRows.length && state.status === 'loaded') return <main className="echo-shell" data-display-mode="phrases">
+  if (echoRows.length && state.status === 'loaded') return <main className="echo-shell" data-display-mode="phrases"
+    data-play-mode={playMode} data-playing={playing}>
     <header className="echo-toolbar">
       <TrackSelect label="主字幕" value={primaryTrackId} disabled={primaryBusy || !primaryTrackId} placeholder="主字幕" tracks={video?.tracks ?? []} isBilibili={isBilibili}
         onChange={value => selectTracks(value, secondaryTrackId === 'none' || value === secondaryTrackId ? null : secondaryTrackId)}/>
@@ -343,18 +375,15 @@ function App() {
     {state.timingMessage ? <p className="echo-notice">{state.timingMessage}</p> : null}
     <ol className="echo-list">{echoRows.map((item, index) => <EchoCueRow key={item.id} item={item} index={index} active={activeId === item.id} onActivate={activateEchoRow}/>)}</ol>
     <footer className="echo-player">
-      <button aria-label="上一句" title="上一句 (A)" disabled={previousIndex < 0} onClick={() => activateEchoRow(previousIndex)}><SkipBack/></button>
-      <button className="echo-play" aria-label={playing ? '暂停' : '播放'} title="播放/暂停 (Space / K)" onClick={togglePlayback}>{playing ? <Pause/> : <Play/>}</button>
-      <button aria-label="下一句" title="下一句 (D)" disabled={nextIndex < 0} onClick={() => activateEchoRow(nextIndex)}><SkipForward/></button>
-      <DropdownMenu.Root><DropdownMenu.Trigger asChild><button className={playMode === 'follow' ? 'active' : ''} aria-label="播放模式" title={playMode === 'follow' ? '逐句跟读' : '连续播放'}>{playMode === 'follow' ? <Repeat2/> : <ListRestart/>}</button></DropdownMenu.Trigger>
-        <DropdownMenu.Portal><DropdownMenu.Content className="echo-mode-content" side="top" sideOffset={8} align="start">
-          <DropdownMenu.RadioGroup value={playMode} onValueChange={value => setPlaybackMode(value as 'all' | 'follow')}>
-            <DropdownMenu.RadioItem className="echo-menu-item" value="all"><ListRestart/><span><strong>连续播放</strong><small>视频自然连续播放</small></span><DropdownMenu.ItemIndicator><Check/></DropdownMenu.ItemIndicator></DropdownMenu.RadioItem>
-            <DropdownMenu.RadioItem className="echo-menu-item" value="follow"><Repeat2/><span><strong>逐句跟读</strong><small>每句结束后留出跟读时间</small></span><DropdownMenu.ItemIndicator><Check/></DropdownMenu.ItemIndicator></DropdownMenu.RadioItem>
-          </DropdownMenu.RadioGroup>
-        </DropdownMenu.Content></DropdownMenu.Portal>
-      </DropdownMenu.Root>
-      <button aria-label="重新播放当前句" title="重播当前句 (S)" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex)}><RefreshCw/></button>
+      <button aria-label="上一句" title="上一句 (A)" disabled={previousIndex < 0} onClick={() => activateEchoRow(previousIndex, 'previous')}><SkipBack/></button>
+      <button className="echo-play" aria-label={playMode === 'auto' && playing ? '暂停' : '播放'}
+        title={playMode === 'auto' ? '播放/暂停 (Space / K)' : '播放并切回自动连续模式 (Space / K)'} onClick={togglePlayback}>
+        {playMode === 'auto' && playing ? <Pause/> : <Play/>}
+      </button>
+      <button aria-label="下一句" title="下一句 (D)" disabled={nextIndex < 0} onClick={() => activateEchoRow(nextIndex, 'next')}><SkipForward/></button>
+      <button className={`echo-shadowing ${playMode === 'shadowing' ? 'active' : ''}`} data-play-mode-control="shadowing" aria-label="逐句跟读"
+        aria-pressed={playMode === 'shadowing'} title="逐句跟读 (E)" onClick={toggleShadowing}>逐句跟读</button>
+      <button aria-label="重新播放当前句" title="重播当前句 (S)" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex, 'replay')}><RefreshCw/></button>
       <span className="echo-player-spacer"/>
       <Popover.Root><Popover.Trigger asChild><button className="echo-rate" aria-label="播放速度" title="播放速度">{rate}x</button></Popover.Trigger>
         <Popover.Portal><Popover.Content className="echo-rate-content" side="top" sideOffset={10} align="end">

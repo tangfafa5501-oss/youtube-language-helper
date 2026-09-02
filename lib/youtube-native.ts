@@ -22,7 +22,6 @@ export type NativeTranscript = {
 const VIDEO_ID = /^[\w-]{11}$/;
 const LANGUAGE = /^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$/;
 const CLIENT_KEYS = new Set(['c', 'cver', 'cos', 'cosver', 'cplatform', 'cbr', 'cbrver', 'cplayer', 'xorb', 'xobt', 'xovt']);
-const MIN_DISPLAY_ROW_MS = 2_000;
 const MAX_SHORT_MERGE_GAP_MS = 1_500;
 
 export function normalizeNativeLanguage(value: string) {
@@ -108,7 +107,7 @@ export function boundedNativeCache(entries: readonly NativeTranscript[]) {
 
 // Reading rows are display-only: SBD restores complete sentences across
 // YouTube ASR event boundaries, while raw cues stay available unchanged.
-export function nativeDisplayPhrases(cues: readonly RawCue[]): TimedPhrase[] {
+export function nativeDisplayPhrases(cues: readonly RawCue[], kind: NativeTrackKind = 'manual'): TimedPhrase[] {
   // YouTube rolling JSON3 commonly inserts timed `"\n"` events between every
   // visible ASR text event. They are layout signals, not spoken pauses or
   // sentence boundaries. Keep them in raw cues, but exclude them from the
@@ -138,24 +137,16 @@ export function nativeDisplayPhrases(cues: readonly RawCue[]): TimedPhrase[] {
     run.push(cue);
   }
   flush();
-  const rows: TimedPhrase[] = groups.flatMap(group => {
+  const phrases = groups.flatMap(group => {
     const text = group.text.replace(/\s+/gu, ' ').trim();
     if (!text || group.startMs === null || group.endMs === null || group.endMs <= group.startMs) return [];
     return [{ id: `youtube-native:${group.id}`, text, startMs: group.startMs, endMs: group.endMs,
       timing: 'youtube-native' as const }];
   });
-  for (let index = 0; index < rows.length;) {
-    const current = rows[index]!, next = rows[index + 1]!;
-    if (current.endMs - current.startMs >= MIN_DISPLAY_ROW_MS) { index++; continue; }
-    const minimumEnd = current.startMs + MIN_DISPLAY_ROW_MS;
-    if (next && next.startMs < minimumEnd) {
-      const separator = /^[,.;:!?\)\]\}，。；：！？、]/u.test(next.text) ? '' : ' ';
-      rows.splice(index, 2, { ...current, id: `${current.id}+${next.id}`,
-        text: `${current.text}${separator}${next.text}`, endMs: Math.max(current.endMs, next.endMs) });
-      continue;
-    }
-    rows[index] = { ...current, endMs: minimumEnd, timing: 'youtube-estimated' };
-    index++;
-  }
-  return rows;
+  if (kind !== 'asr') return phrases;
+  return phrases.map((phrase, index) => {
+    const nextStartMs = phrases[index + 1]?.startMs;
+    if (nextStartMs === undefined || nextStartMs <= phrase.startMs || phrase.endMs <= nextStartMs) return phrase;
+    return { ...phrase, endMs: nextStartMs };
+  });
 }

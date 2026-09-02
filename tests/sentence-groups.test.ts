@@ -22,13 +22,14 @@ test('SBD crosses raw cue boundaries, protects abbreviations, and preserves all 
   assert.deepEqual(groups.flatMap(g => g.cues), cues); assert.deepEqual(cues, before);
 });
 
-test('only sub-2s groups join forward; exact 2s, longer groups, and the final short sentence remain', () => {
+test('natural sentence groups keep their own canonical timing regardless of duration', () => {
   const groups = groupSentences(fixture([
     ['One!', 0, 1000], ['Two!', 1000, 1000], ['Three!', 2000, 500],
     ['Four!', 3000, 2001], ['Five!', 6000, 2000], ['Six!', 8000, 3000], ['End!', 11000, 200],
   ]));
-  assert.deepEqual(groups.map(g => g.text), ['One! Two!', 'Three! Four!', 'Five!', 'Six!', 'End!']);
-  assert.deepEqual(groups.map(g => [g.startMs, g.endMs]), [[0, 2000], [2000, 5001], [6000, 8000], [8000, 11000], [11000, 11200]]);
+  assert.deepEqual(groups.map(g => g.text), ['One!', 'Two!', 'Three!', 'Four!', 'Five!', 'Six!', 'End!']);
+  assert.deepEqual(groups.map(g => [g.startMs, g.endMs]), [[0, 1000], [1000, 2000], [2000, 2500], [3000, 5001],
+    [6000, 8000], [8000, 11000], [11000, 11200]]);
 });
 
 test('a short caption remains separate when the next sentence starts after a long silence', () => {
@@ -99,21 +100,21 @@ test('439 unpunctuated synthetic cues spanning 21 minutes are not interpreted as
   assert.ok(groups.every(g => /缺少句末标点/.test(g.notice ?? '')));
 });
 
-test('unpunctuated tail after a real sentence falls back locally, while sub-2s fragments still join forward', () => {
+test('unpunctuated tail after a real sentence falls back locally without duration-based merging', () => {
   const cues = fixture([['This sentence ends here.', 0, 3000],
     ['short fragment', 3000, 1000], ['next fragment', 4000, 3000], ['another fragment', 7000, 3000]]);
   const groups = groupSentences(cues);
-  assert.deepEqual(groups.map(g => g.text), ['This sentence ends here.', 'short fragment next fragment', 'another fragment']);
-  assert.deepEqual(groups.map(g => g.startMs), [0, 3000, 7000]);
+  assert.deepEqual(groups.map(g => g.text), ['This sentence ends here.', 'short fragment', 'next fragment', 'another fragment']);
+  assert.deepEqual(groups.map(g => g.startMs), [0, 3000, 4000, 7000]);
   assert.deepEqual(groups.flatMap(g => g.cues), cues);
 });
 
-test('large overlapping short-cue input preserves every member without recursive or spread growth', () => {
+test('large overlapping short-cue input stays linear and preserves every independent sentence', () => {
   const cues = fixture(Array.from({ length: 5000 }, () => ['Repeat!', 1200125, 500] as [string, number, number]));
   const groups = groupSentences(cues);
-  assert.equal(groups.length, 1); assert.equal(groups[0].cues.length, 5000);
-  assert.equal(groups[0].startMs, 1200125); assert.equal(groups[0].endMs, 1200625);
-  assert.deepEqual(groups[0].cues, cues);
+  assert.equal(groups.length, 5000); assert.ok(groups.every(group => group.cues.length === 1));
+  assert.equal(groups[0].startMs, 1200125); assert.equal(groups.at(-1)!.endMs, 1200625);
+  assert.deepEqual(groups.flatMap(group => group.cues), cues);
 });
 
 test('an abnormally large continuous run bypasses SBD while preserving every raw cue', () => {

@@ -22,12 +22,7 @@ export function adjacentPlaybackRate(current: number, direction: -1 | 1) {
   return PLAYBACK_RATES[index + direction] ?? current;
 }
 
-export type PlayMode = 'single' | 'loop' | 'all' | 'follow';
-
-export function followPauseMs(startMs: number, endMs: number) {
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 2_000;
-  return Math.min(10_000, Math.max(2_000, Math.round(endMs - startMs)));
-}
+export type PlayMode = 'auto' | 'manual' | 'shadowing';
 
 export const PLAYER_SHORTCUTS = {
   playOrPause: 'Space',

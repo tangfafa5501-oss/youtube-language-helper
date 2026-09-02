@@ -16,7 +16,7 @@
 - `applyNativeAuth()` 在安全 URL 上追加有限客户端参数以及十分钟内捕获的授权字段。
 - `chooseNativeTranscript()` 按视频、轨道类型和标准化语言选择最新缓存；有地区歧义时不猜测。
 - `parseJson3()` 保留所有文本事件，区分控制事件并显式报告非法结构或空正文。
-- `nativeDisplayPhrases()` 忽略布局换行事件，按自然句组合显示行，并保证最终行不少于 2000ms。
+- `nativeDisplayPhrases()` 忽略布局换行事件并按自然句组合显示行；完整短句保留自身 canonical 时间，不设 2000ms 硬限制。
 
 ## 自动断言
 
@@ -24,7 +24,7 @@
 - 同一视频的人工轨、自动轨和不同语言缓存不会串轨。
 - 含地区代码的精确选择优先；基础语言存在多个地区候选时返回无匹配而不是猜测。
 - 用户核心反例精确合并为 `And what if you were wrong about every single one?`。
-- Side Panel DOM 最终为 `data-display-mode=phrases`，短行计数为 0。
+- Side Panel DOM 最终为 `data-display-mode=phrases`；短行计数仅作诊断，不决定合格与否。
 
 ## 证据边界
 

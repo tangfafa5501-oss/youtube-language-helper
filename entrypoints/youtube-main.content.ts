@@ -106,6 +106,18 @@ export default defineContentScript({
         }
         reply({ restored: true }); return;
       }
+      if (m.type === 'pause-video') {
+        const v = info();
+        if (!v || m.videoId !== v.videoId || m.session !== v.session) {
+          reply({ error: '视频会话已切换，未执行播放器内核暂停' }); return;
+        }
+        const player = document.getElementById('movie_player') as (HTMLElement & { pauseVideo?: () => void }) | null;
+        if (typeof player?.pauseVideo !== 'function') {
+          reply({ error: 'YouTube 播放器内核暂停 API 尚未就绪' }); return;
+        }
+        player.pauseVideo();
+        reply({ paused: true }); return;
+      }
       if (m.type !== 'load' || typeof m.trackId !== 'string') return;
       if (busy) { reply({ error: '上一字幕请求仍在结束，请稍后重试' }); return; }
       const v = info();

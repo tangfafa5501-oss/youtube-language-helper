@@ -62,7 +62,7 @@ test('native display repairs usable event timing without mutating raw cue text o
     { cueId: 't:2', sourceIndex: 2, text: 'Third line.', startMs: 4_000, endMs: 5_000, timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
   ];
   assert.deepEqual(nativeDisplayPhrases(cues).map(row => [row.text, row.startMs, row.endMs]), [
-    ['First line.', 0, 2_000], ['second line', 2_000, 4_000], ['Third line.', 4_000, 6_000],
+    ['First line.', 0, 1_500], ['second line', 2_000, 4_000], ['Third line.', 4_000, 5_000],
   ]);
   assert.equal(cues[0]!.text, '  second\nline '); assert.equal(cues[0]!.endMs, 0);
 });
@@ -83,8 +83,21 @@ test('native display restores complete sentences across real YouTube ASR event b
   assert.deepEqual(nativeDisplayPhrases(cues).map(row => [row.text, row.startMs, row.endMs]), [
     ["It's the most famous revenge story ever written.", 0, 4_000],
     ["But the hero, he doesn't want revenge.", 4_000, 8_000],
-    ['How? The story continues.', 8_000, 12_000],
+    ['How?', 8_000, 9_000], ['The story continues.', 9_000, 12_000],
   ]);
+});
+
+test('ASR final phrases clamp a forward overlap without mutating cues or changing manual-track timing', () => {
+  const cues = [
+    { cueId: 'overlap:0', sourceIndex: 0, text: 'First sentence.', startMs: 1_000, endMs: 4_500,
+      timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
+    { cueId: 'overlap:1', sourceIndex: 1, text: 'Second sentence.', startMs: 4_000, endMs: 7_000,
+      timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
+  ];
+  const before = structuredClone(cues);
+  assert.deepEqual(nativeDisplayPhrases(cues, 'asr').map(row => [row.startMs, row.endMs]), [[1_000, 4_000], [4_000, 7_000]]);
+  assert.deepEqual(nativeDisplayPhrases(cues, 'manual').map(row => [row.startMs, row.endMs]), [[1_000, 4_500], [4_000, 7_000]]);
+  assert.deepEqual(cues, before);
 });
 
 test('installed-real screenshot fragments join the sentence before short-row handling', () => {
@@ -128,25 +141,25 @@ test('real YouTube rolling newline events do not split the Dr Jekyll sentence', 
       timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
   ];
   const before = structuredClone(cues);
-  assert.deepEqual(nativeDisplayPhrases(cues).map(row => [row.text, row.startMs, row.endMs]), [
-    ['A doctor, right before he lost everything.', 10_560, 17_080],
+  assert.deepEqual(nativeDisplayPhrases(cues, 'asr').map(row => [row.text, row.startMs, row.endMs]), [
+    ['A doctor, right before he lost everything.', 10_560, 14_160],
     ['His name was Dr. Jekyll, and this is his story.', 14_160, 20_600],
   ]);
   assert.deepEqual(cues, before);
 });
 
-test('native display merges only sub-two-second rows and never splits at five seconds', () => {
+test('native display preserves short natural rows and never splits a complete long sentence', () => {
   const cues = [
     { cueId: 'long', sourceIndex: 0, text: 'A complete natural line.', startMs: 0, endMs: 5_500, timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
     { cueId: 'short', sourceIndex: 1, text: 'Short.', startMs: 5_500, endMs: 6_500, timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
     { cueId: 'next', sourceIndex: 2, text: 'Next line.', startMs: 6_500, endMs: 9_000, timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
   ];
   assert.deepEqual(nativeDisplayPhrases(cues).map(row => [row.text, row.startMs, row.endMs]), [
-    ['A complete natural line.', 0, 5_500], ['Short. Next line.', 5_500, 9_000],
+    ['A complete natural line.', 0, 5_500], ['Short.', 5_500, 6_500], ['Next line.', 6_500, 9_000],
   ]);
 });
 
-test('native display guarantees every row is at least two seconds, including the final tail', () => {
+test('native display never extends a short row beyond its canonical cue timing', () => {
   const cues = [
     { cueId: 'brief', sourceIndex: 0, text: 'Brief.', startMs: 0, endMs: 1_000, timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
     { cueId: 'later', sourceIndex: 1, text: 'Continue later.', startMs: 5_000, endMs: 8_000, timingSource: 'start+duration' as const, timingIssue: null, raw: {} },
@@ -154,15 +167,14 @@ test('native display guarantees every row is at least two seconds, including the
   ];
   const rows = nativeDisplayPhrases(cues);
   assert.deepEqual(rows.map(row => [row.text, row.startMs, row.endMs, row.timing]), [
-    ['Brief.', 0, 2_000, 'youtube-estimated'],
+    ['Brief.', 0, 1_000, 'youtube-native'],
     ['Continue later.', 5_000, 8_000, 'youtube-native'],
-    ['Tail.', 9_000, 11_000, 'youtube-estimated'],
+    ['Tail.', 9_000, 9_400, 'youtube-native'],
   ]);
-  assert.ok(rows.every(row => row.endMs - row.startMs >= 2_000));
   assert.deepEqual(cues.map(cue => [cue.startMs, cue.endMs]), [[0, 1_000], [5_000, 8_000], [9_000, 9_400]]);
 });
 
-test('native display enforces the two-second invariant across gaps, overlaps and invalid boundaries', () => {
+test('native display keeps valid positive timing across gaps, overlaps and invalid boundaries', () => {
   for (let seed = 1; seed <= 100; seed++) {
     let value = seed;
     const random = () => (value = value * 16_807 % 2_147_483_647) / 2_147_483_647;
@@ -180,7 +192,7 @@ test('native display enforces the two-second invariant across gaps, overlaps and
     });
     const before = structuredClone(cues);
     const rows = nativeDisplayPhrases(cues);
-    assert.ok(rows.every(row => row.endMs - row.startMs >= 2_000), `seed ${seed} emitted a short row`);
+    assert.ok(rows.every(row => row.endMs > row.startMs), `seed ${seed} emitted invalid timing`);
     assert.deepEqual(cues, before, `seed ${seed} mutated raw cues`);
   }
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { adjacentPlaybackRate, followPauseMs, isPlaybackRate, PLAYER_SHORTCUTS, PLAYBACK_RATES } from '../lib/protocol.ts';
+import { adjacentPlaybackRate, isPlaybackRate, PLAYER_SHORTCUTS, PLAYBACK_RATES } from '../lib/protocol.ts';
 
 test('playback speed menu and content scripts share the selected Enjoy-style rates', () => {
   assert.deepEqual([...PLAYBACK_RATES], [.5, 1, 1.5, 2]);
@@ -19,11 +19,4 @@ test('playback rate steps and shortcut defaults follow Enjoy media controls', ()
     toggleEcho: 'KeyE', toggleDictation: 'KeyH', record: 'KeyR', playRecording: 'KeyG',
     decreaseRate: 'Comma', increaseRate: 'Period',
   });
-});
-
-test('follow mode pauses for the sentence duration within the two-to-ten-second guardrail', () => {
-  assert.equal(followPauseMs(1_000, 1_500), 2_000);
-  assert.equal(followPauseMs(1_000, 7_000), 6_000);
-  assert.equal(followPauseMs(1_000, 30_000), 10_000);
-  assert.equal(followPauseMs(Number.NaN, 3_000), 2_000);
 });

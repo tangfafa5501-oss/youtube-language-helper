@@ -12,10 +12,12 @@ const events = () => { const listeners = new Set(); return { addListener: fn => 
 async function harness(t, { withMain = false, separateTracks = false, delayEnglish = false, metadataDelayMs = 0,
   metadataDelays = [], pageCid = '2', failPlayerCount = 0 } = {}) {
   const timers = new Set(), connect = events(), document = new EventTarget();
+  document.documentElement = { dataset: {} };
   const requests = [];
   let remainingPlayerFailures = failPlayerCount;
-  const video = { readyState: 4, duration: 300, currentTime: 0, paused: true, playbackRate: 1,
-    play: async () => { video.paused = false; }, pause: () => { video.paused = true; } };
+  const video = Object.assign(new EventTarget(), { readyState: 4, duration: 300, currentTime: 0, paused: true, playbackRate: 1, seeking: false });
+  video.play = async () => { video.paused = false; video.dispatchEvent(new Event('play')); video.dispatchEvent(new Event('playing')); };
+  video.pause = () => { video.paused = true; video.dispatchEvent(new Event('pause')); };
   document.title = 'Synthetic Bilibili';
   document.querySelector = selector => selector === '.bpx-state-multi-active-item[data-cid]'
     ? (pageCid ? { getAttribute: name => name === 'data-cid' ? pageCid : null } : null)
@@ -82,7 +84,8 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
   const send = message => onMessage.emit({ version: 1, videoId: state().video.videoId, session: state().video.session,
     trackId: state().trackId, ...message });
   const sendRaw = message => onMessage.emit(message);
-  return { state, send, sendRaw, video, messages, requests, location, disconnect: port.disconnect };
+  return { state, send, sendRaw, video, messages, requests, location, diagnostics: document.documentElement.dataset,
+    disconnect: port.disconnect };
 }
 
 test('production Bilibili page bridge keeps website primary and secondary tracks independent', async t => {
@@ -132,7 +135,7 @@ test('same-BV part navigation rejects old playback before the polling refresh ru
   const h = await harness(t), before = h.state(), phrase = before.phrases[0];
   h.location.href = 'https://www.bilibili.com/video/BV1GJ411x7h7/?p=2';
   h.sendRaw({ version: 1, type: 'seek', videoId: before.video.videoId, session: before.video.session,
-    trackId: before.trackId, phraseId: phrase.id, playMode: 'single' });
+    trackId: before.trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(50); assert.equal(h.video.currentTime, 0); assert.equal(h.video.paused, true);
 });
 
@@ -154,23 +157,57 @@ test('production Bilibili bridge loads the website bilingual track and preserves
   assert.match(state.phrases[0].text, /^Hello students\.\n同学们好。/);
 });
 
-test('production Bilibili bridge seeks and enforces single segment playback', async t => {
+test('production Bilibili bridge seeks precisely and enforces manual sentence playback', async t => {
   const h = await harness(t), phrase = h.state().phrases[0];
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'single' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(20); assert.equal(h.video.currentTime, phrase.startMs / 1000); assert.equal(h.video.paused, false);
-  h.video.currentTime = phrase.endMs / 1000 + .03; await sleep(100);
-  assert.equal(h.video.paused, true); assert.equal(h.video.currentTime, phrase.startMs / 1000);
+  h.video.currentTime = phrase.endMs / 1000 - .025; await sleep(100);
+  const actualMs = h.video.currentTime * 1000;
+  assert.equal(h.video.paused, true);
+  assert.ok(Math.abs(actualMs - phrase.endMs) <= 20, `manual brake drift ${actualMs - phrase.endMs}ms exceeds ±20ms`);
+  assert.equal(h.diagnostics.ylhBrakeMode, 'manual');
+  assert.equal(h.diagnostics.ylhBrakeTrigger, 'poller');
+  assert.equal(Number(h.diagnostics.ylhBrakePollIntervalMs), 12);
+  assert.equal(Number(h.diagnostics.ylhBrakeLeadMs), 30);
+  assert.ok(Math.abs(Number(h.diagnostics.ylhBrakeDriftMs)) <= 20);
+  assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /误差 0\.0ms/);
 });
 
-test('Bilibili follow mode pauses at a sentence end and playback resumes immediately with the next sentence', async t => {
+test('Bilibili previous navigation enters manual and play atomically returns to auto', async t => {
   const h = await harness(t), [first, second] = h.state().phrases;
   assert.ok(first && second);
-  h.send({ type: 'seek', phraseId: first.id, playMode: 'follow' });
+  h.send({ type: 'seek', phraseId: first.id, playMode: 'auto', intent: 'previous' });
+  await sleep(20);
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'manual');
   await sleep(20); h.video.currentTime = first.endMs / 1000; await sleep(100);
-  assert.equal(h.video.paused, true);
-  h.send({ type: 'playback-toggle' }); await sleep(30);
-  assert.equal(h.video.currentTime, second.startMs / 1000);
+  assert.equal(h.video.paused, true); await sleep(150);
+  assert.equal(h.video.currentTime, first.endMs / 1000);
+  h.send({ type: 'playback-toggle' }); await sleep(280);
+  assert.equal(h.video.currentTime, first.endMs / 1000);
   assert.equal(h.video.paused, false);
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
+});
+
+test('Bilibili shadowing waits the exact 3-second phrase duration and automatically plays the next phrase', async t => {
+  const h = await harness(t), [first, second] = h.state().phrases;
+  assert.equal(first.endMs - first.startMs, 3_000); assert.ok(second);
+  h.send({ type: 'seek', phraseId: first.id, playMode: 'shadowing' });
+  await sleep(20); h.video.currentTime = first.endMs / 1000 - .025;
+  await sleep(40);
+  const brakeActualMs = Number(h.diagnostics.ylhBrakeActualMs);
+  assert.equal(h.video.paused, true);
+  assert.ok(Math.abs(brakeActualMs - first.endMs) <= 20,
+    `shadowing brake drift ${brakeActualMs - first.endMs}ms exceeds ±20ms`);
+  assert.equal(h.diagnostics.ylhBrakeMode, 'shadowing');
+  assert.equal(h.diagnostics.ylhBrakeTrigger, 'poller');
+  for (let attempt = 0; attempt < 350 && !h.messages.some(message => message.type === 'shadowing-cycle'); attempt++) await sleep(10);
+  const cycle = h.messages.find(message => message.type === 'shadowing-cycle');
+  assert.ok(cycle, JSON.stringify(h.messages.filter(message => message.type === 'playback-state' || message.type === 'shadowing-cycle').slice(-20)));
+  assert.equal(cycle.expectedWaitMs, 3_000);
+  assert.ok(Math.abs(cycle.waitErrorMs) <= 50, `actual wait error ${cycle.waitErrorMs}ms`);
+  assert.equal(cycle.boundaryErrorMs, 0);
+  assert.equal(h.video.currentTime, second.startMs / 1000); assert.equal(h.video.paused, false);
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'shadowing');
 });
 
 test('Bilibili playback controls reject a stale subtitle track binding', async t => {
@@ -186,12 +223,13 @@ test('Bilibili does not publish invalid media clock values to the side panel', a
   await sleep(300); assert.equal(h.messages.filter(message => message.type === 'playback-state').length, count);
 });
 
-test('Bilibili single playback does not stop twenty milliseconds before the real cue end', async t => {
+test('Bilibili manual playback brakes only after entering the 30ms lead window', async t => {
   const h = await harness(t), phrase = h.state().phrases[0];
-  h.send({ type: 'seek', phraseId: phrase.id, playMode: 'single' }); await sleep(20);
-  h.video.currentTime = phrase.endMs / 1000 - .01; await sleep(100);
-  assert.equal(h.video.paused, false); assert.equal(h.video.currentTime, phrase.endMs / 1000 - .01);
-  h.video.currentTime = phrase.endMs / 1000; await sleep(100); assert.equal(h.video.paused, true);
+  h.send({ type: 'seek', phraseId: phrase.id, playMode: 'manual' }); await sleep(20);
+  h.video.currentTime = phrase.endMs / 1000 - .031; await sleep(40);
+  assert.equal(h.video.paused, false); assert.equal(h.video.currentTime, phrase.endMs / 1000 - .031);
+  h.video.currentTime = phrase.endMs / 1000 - .030; await sleep(40); assert.equal(h.video.paused, true);
+  assert.ok(Math.abs(h.video.currentTime * 1000 - phrase.endMs) <= 20);
 });
 
 test('a new Bilibili track selection cancels an older in-flight subtitle load', async t => {
@@ -207,9 +245,9 @@ test('a new Bilibili track selection cancels an older in-flight subtitle load', 
   assert.match(h.state().cues[0].text, /同学们好/);
 });
 
-test('changing Bilibili subtitle track cancels the old loop boundary', async t => {
+test('changing Bilibili subtitle track destroys the old manual boundary', async t => {
   const h = await harness(t), phrase = h.state().phrases[0];
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'loop' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(20);
   const english = h.state().video.tracks.find(track => track.language === 'en-US');
   h.send({ type: 'bilibili-select', trackId: english.id });
@@ -223,29 +261,29 @@ test('changing Bilibili subtitle track cancels the old loop boundary', async t =
 test('Bilibili rejects a cue at or beyond media duration', async t => {
   const h = await harness(t), before = h.video.currentTime;
   h.video.duration = .5;
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: h.state().phrases[0].id, playMode: 'single' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: h.state().phrases[0].id, playMode: 'manual' });
   await sleep(20);
   assert.equal(h.video.currentTime, before);
   assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /超出/);
 });
 
-test('Bilibili clamps a segment end to media duration before enforcing single playback', async t => {
+test('Bilibili clamps a manual sentence end to media duration', async t => {
   const h = await harness(t), phrase = h.state().phrases[0];
   h.video.duration = 2.5;
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'single' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(20);
   h.video.currentTime = 2.51;
   await sleep(100);
   assert.equal(h.video.paused, true);
-  assert.equal(h.video.currentTime, phrase.startMs / 1000);
+  assert.equal(h.video.currentTime, 2.5);
 });
 
-test('a rejected Bilibili play clears the loop boundary and reports safely', async t => {
+test('a rejected Bilibili play clears the manual boundary and reports safely', async t => {
   const h = await harness(t), phrase = h.state().phrases[0];
   h.video.play = async () => { throw new Error('synthetic autoplay rejection'); };
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'loop' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(20);
-  assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /拦截/);
+  assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /未完成/);
   h.video.paused = false; h.video.currentTime = phrase.endMs / 1000 + .05;
   await sleep(100);
   assert.ok(h.video.currentTime > phrase.endMs / 1000);
@@ -256,7 +294,7 @@ test('Bilibili does not post an asynchronous seek result after its requesting pa
   let release;
   h.video.play = () => new Promise(resolve => { release = resolve; });
   const before = h.messages.filter(message => message.type === 'playback').length;
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'single' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(20); h.disconnect(); release(); await sleep(20);
   assert.equal(h.messages.filter(message => message.type === 'playback').length, before);
 });
@@ -264,7 +302,7 @@ test('Bilibili does not post an asynchronous seek result after its requesting pa
 test('Bilibili SPA navigation rejects controls from the previous video session', async t => {
   const h = await harness(t), before = h.state();
   const stale = { version: 1, videoId: before.video.videoId, session: before.video.session, trackId: before.trackId,
-    type: 'seek', phraseId: before.phrases[0].id, playMode: 'single' };
+    type: 'seek', phraseId: before.phrases[0].id, playMode: 'manual' };
   h.location.href = 'https://www.bilibili.com/video/BV1Q541167Qg/?p=1';
   for (let i = 0; i < 120 && h.state().video?.videoId !== 'BV1Q541167Qg'; i++) await sleep(10);
   assert.equal(h.state().video.videoId, 'BV1Q541167Qg');
@@ -278,39 +316,41 @@ test('two Bilibili tabs keep playback and sessions isolated', async t => {
   assert.notEqual(first.state().video.session, second.state().video.session);
   const phrase = first.state().phrases[0];
   second.video.currentTime = 9;
-  first.send({ type: 'seek', trackId: first.state().trackId, phraseId: phrase.id, playMode: 'single' });
+  first.send({ type: 'seek', trackId: first.state().trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(30);
   assert.equal(first.video.currentTime, phrase.startMs / 1000);
   assert.equal(second.video.currentTime, 9);
 });
 
-test('Bilibili loop and continuous modes enforce their own playback boundaries', async t => {
+test('Bilibili auto and manual modes enforce distinct playback boundaries', async t => {
   const h = await harness(t), phrase = h.state().phrases[0];
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'loop' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(20); h.video.currentTime = phrase.endMs / 1000 + .04; await sleep(100);
   assert.equal(h.video.paused, true);
-  assert.equal(h.video.currentTime, phrase.startMs / 1000);
-  await sleep(520); assert.equal(h.video.paused, false);
+  assert.equal(h.video.currentTime, phrase.endMs / 1000);
+  await sleep(150); assert.equal(h.video.paused, true);
 
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'all' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'auto' });
   await sleep(20); h.video.currentTime = phrase.endMs / 1000 + .07; await sleep(100);
   assert.equal(h.video.paused, false);
   assert.equal(h.video.currentTime, phrase.endMs / 1000 + .07);
 });
 
-test('Bilibili loop pause switches to continuous mode without waiting for the old timer', async t => {
+test('Bilibili manual waiting switches to auto and resumes immediately', async t => {
   const h = await harness(t), phrase = h.state().phrases[0];
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'loop' });
+  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'manual' });
   await sleep(20); h.video.currentTime = phrase.endMs / 1000 + .02; await sleep(100);
   assert.equal(h.video.paused, true);
-  h.send({ type: 'playback-mode', mode: 'all' }); await sleep(20);
+  h.send({ type: 'playback-mode', mode: 'auto' }); await sleep(20);
   assert.equal(h.video.paused, false);
 });
 
-test('a rejected Bilibili loop resume stops cleanly', async t => {
-  const h = await harness(t), phrase = h.state().phrases[0]; let calls = 0;
-  h.video.play = async () => { calls++; if (calls > 1) throw new Error('synthetic loop resume rejection'); h.video.paused = false; };
-  h.send({ type: 'seek', trackId: h.state().trackId, phraseId: phrase.id, playMode: 'loop' });
-  await sleep(20); h.video.currentTime = phrase.endMs / 1000 + .02; await sleep(650);
-  assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /已停止循环/);
+test('rapid Bilibili previous/next seeks leave only the last manual target active', async t => {
+  const h = await harness(t), [first, second] = h.state().phrases;
+  h.send({ type: 'seek', phraseId: first.id, playMode: 'auto', intent: 'previous' });
+  h.send({ type: 'seek', phraseId: second.id, playMode: 'auto', intent: 'next' });
+  await sleep(40);
+  assert.equal(h.video.currentTime, second.startMs / 1000);
+  const playback = h.messages.filter(message => message.type === 'playback-state').at(-1);
+  assert.equal(playback.playMode, 'manual'); assert.equal(playback.manualStartMs, second.startMs);
 });

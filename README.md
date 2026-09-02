@@ -7,8 +7,8 @@
 - YouTube：捕获并读取网页原生 `/api/timedtext`，支持 JSON3/XML、人工轨和自动轨；字幕到达后立即推送到已连接侧栏，重连时优先读取会话缓存。
 - Bilibili：通过网站 WBI 接口读取官方字幕轨并复用网页登录态。
 - 双字幕：主字幕与第二字幕独立选择。第二轨只按时间覆盖显示，不改变主轨的文本、起止时间或点击定位。
-- 自然语句：保留原始 cue，不修改网站正文和时间；显示层按句界组合连续语句，短于 2000ms 的行向后合并或延长到 2000ms，不设置固定最长拆分上限。
-- 播放：点击定位、上一句、下一句、连续播放、逐句跟读、`0.5 / 1 / 1.5 / 2` 倍速、播放中高亮，以及 `Space / K / Shift+< / Shift+> / E / A / S / D` 快捷键。
+- 自然语句：保留原始 cue，不修改网站正文和时间；显示层只按自然句界和可证明的静音边界组合，不再对低于 2000ms 的完整短句做硬性合并或延时。
+- 播放：提供明确的 Auto（连续播放）/Manual（逐句跟读）状态；上一句、下一句和重播会原子切换到 Manual，在句尾强制暂停，主动播放时只推进一条。另支持 `0.5 / 1 / 1.5 / 2` 倍速和快捷键。
 - 设置：外观、自然语句/原始字幕和字幕语言；支持跟随系统、浅色和深色主题。
 - 预留功能：听写、录音与评分入口会明确显示尚未开放，不申请权限，也不伪装成已实现。
 
@@ -22,7 +22,7 @@ YouTube 原始层完整保留每个文本事件，包括重复、空白、重叠
 
 - 句末标点优先决定自然句边界。
 - 相邻 cue 之间超过 1500ms 时分开处理，避免跨长静音拼接。
-- 小于 2000ms 的显示行优先与下一行合并；无法可靠合并时只延长显示结束时间并标记为估算。
+- 完整短句保留自身 canonical start/end，不以持续时间为由拼接下一句或延长结束时间。
 - 不以固定最长时长强拆完整句子。
 - 原始 cue 始终可切换查看，播放定位仍可追溯到网站时间。
 
@@ -50,12 +50,12 @@ D:\github\youtube-language-helper\.output\chrome-mv3
 
 ## 当前验证结果
 
-- 77/77 单元测试通过。
+- 82/82 单元测试通过。
 - 61/61 生产 bundle 集成测试通过。
 - TypeScript 类型检查和 Chrome MV3 生产构建通过。
-- 独立 Chrome for Testing 152 的真实 JSON3 回放通过 24/24 断言，输出 `ALL PASSED (100%)`。
-- 生产树 SHA-256：`A89A8ECD6CB49A4D9FC7B8AD81D6E96E82706470FBEF7A59DFFB7F477835D219`。
-- `wKpqixrbb6E` 回放最终 DOM 为 299 行，`data-display-mode=phrases`，`underTwoCountFromDom=0`。
+- 独立 Chrome for Testing 152 的播放闭环通过 20/20 断言，输出 `ALL PASSED (100%)`；YouTube 使用真实 JSON3 回放与真实播放器，B站使用受控官方响应结构与真实 Chromium 媒体元素。
+- 运行时 `youtube.js` SHA-256：`BC0A7A15519A69837ECD0B35C2659554E8A424A3E66CC9C2DE32F55956823527`；`bilibili.js`：`50517E4E622B4593C9FA24D39E6DBBE5D89ABE1CEF0B9CE3A6E02E7CEA80736E`，均与当前构建一致。
+- YouTube `10.560s`、`14.160s` 与 B站 `1.500s` 定位报告误差均为 `0.0ms`；两平台句尾均精确暂停并保持不继续播放。
 - 核心反例完整显示为 `And what if you were wrong about every single one?`；`single one?` 和 `wrong.` 均不存在独立行。
 - 证据：[截图](artifacts/acceptance/test-browser-realdata-replay.png)和[断言结果](artifacts/acceptance/test-browser-realdata-replay.png.json)。证据等级为 `test-browser real-data replay`，不是用户当前 Chrome 的 `installed-real`，也不是实时网络字幕验收。
 
@@ -68,6 +68,7 @@ D:\github\youtube-language-helper\.output\chrome-mv3
 - `entrypoints/bilibili.content.ts`：B站字幕解析、切轨、定位和播放边界。
 - `entrypoints/sidepanel/`：双字幕侧栏、播放、快捷键和设置入口。
 - `lib/youtube-native.ts`：原生字幕安全校验、缓存选择和显示语句派生。
+- `lib/playback-machine.ts`：Auto/Manual 状态、精准 seek、句尾边界和监听器生命周期。
 - `tests/integration/`：生产构建脚本的受控集成验证。
 
 ## 许可与来源

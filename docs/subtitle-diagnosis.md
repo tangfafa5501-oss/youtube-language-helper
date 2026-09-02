@@ -17,7 +17,7 @@
 - 后台曾只保存和广播捕获结果，内容脚本没有消费 `captured`；连接或刷新时也没有查询 `latest`，所以网页已经取得字幕但侧栏仍停在准备状态。
 - 旧显示路径在失败时会回退到碎片化原始块，造成完整问句被拆成独立短行。
 
-当前提交已经通过生产 bundle 回归覆盖上述三类问题：捕获即时推送、重连缓存优先、拒绝/超时/畸形缓存继续正常请求，以及短行 DOM 门禁。
+当前提交已经通过生产 bundle 回归覆盖上述三类问题：捕获即时推送、重连缓存优先、拒绝/超时/畸形缓存继续正常请求，以及自然句边界回归。
 
 ## 诊断时间线
 
@@ -38,7 +38,7 @@
 - `phraseCount` 等于预期值。
 - Side Panel 根容器 `data-display-mode=phrases`。
 - 每个字幕节点都能解析 `startMs/endMs`。
-- `endMs - startMs >= 2000`，即 `underTwoCount === 0`。
+- 每个派生句保留可证明的 canonical start/end；低于 2000ms 允许存在，`underTwoCount` 仅作诊断。
 - 核心目标句完整存在。
 - `single one?` 和 `wrong.` 不存在独立行。
 
@@ -54,6 +54,6 @@
 
 ## 证据等级
 
-当前 24/24 证据属于 `test-browser real-data replay`。Chrome for Testing 没有暴露原生 Side Panel page target，因此测试在真实生产 `sidepanel.html` 页面执行 DOM 与交互断言；这不覆盖用户当前 Chrome 的 `installed-real`，也不等于实时网络端到端验收。
+当前播放闭环 20/20 证据属于独立 `test-browser`。YouTube 使用真实 JSON3 离线回放与在线播放器；B站使用受控官方响应结构与真实 Chromium 媒体元素。测试在真实生产 `sidepanel.html` 页面执行，不能升级为用户当前 Chrome 的 `installed-real` 或 B站 live API 证据。
 
 遇到失败时按“表现、直接原因、根本原因、影响、已做修复、仍需验证”记录，不使用口头成功承诺替代断言输出。

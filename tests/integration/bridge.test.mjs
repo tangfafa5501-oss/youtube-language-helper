@@ -30,12 +30,13 @@ async function harness(t) {
     { tStartMs: 1_000, dDurationMs: 2_000, segs: [{ utf8: 'Hola', tOffsetMs: 0 }, { utf8: ' mundo', tOffsetMs: 1_000 }] },
   ] });
   let pauseResponse = false; let releaseResponse;
-  let plays = 0; let fetched; let adShowing = false; let nativeAuthAvailable = true; let nativeFetchNeedsAuth = false; let primeClicks = 0;
+  let plays = 0; let kernelPauses = 0; let fetched; let adShowing = false; let nativeAuthAvailable = true; let nativeFetchNeedsAuth = false; let primeClicks = 0;
   let nativeCachedEntry = null; let latestBehavior = 'normal';
   const nativeMessages = [];
-  const video = { readyState: 4, duration: 1600, currentTime: 0, paused: true, playbackRate: 1,
-    play: async () => { plays++; video.paused = false; }, pause: () => { video.paused = true; } };
-  const player = { getPlayerResponse: () => ({ videoDetails: { videoId, title: 'Synthetic fixture' }, playabilityStatus: { status: 'OK' },
+  const video = Object.assign(new EventTarget(), { readyState: 4, duration: 1600, currentTime: 0, paused: true, playbackRate: 1, seeking: false });
+  video.play = async () => { plays++; video.paused = false; video.dispatchEvent(new Event('play')); video.dispatchEvent(new Event('playing')); };
+  video.pause = () => { video.paused = true; video.dispatchEvent(new Event('pause')); };
+  const player = { pauseVideo: () => { kernelPauses++; }, getPlayerResponse: () => ({ videoDetails: { videoId, title: 'Synthetic fixture' }, playabilityStatus: { status: 'OK' },
     captions: { playerCaptionsTracklistRenderer: { captionTracks: tracksReady ? [
       { baseUrl: `/api/timedtext?v=${videoId}&lang=en`, vssId: '.en', languageCode: 'en', name: { simpleText: 'English' } },
       { baseUrl: `/api/timedtext?v=${videoId}&lang=en&kind=asr`, vssId: 'a.en', languageCode: 'en', kind: 'asr', name: { simpleText: 'English auto' } },
@@ -97,12 +98,13 @@ async function harness(t) {
       Promise.resolve().then(() => {
       const event = new Event('message'); Object.assign(event, { data, source: window, origin: location.origin }); bus.dispatchEvent(event);
     }); };`, context);
+  const panels = [];
   await runInContext(mainCode, context);
   await runInContext(contentCode, context);
+  t.after(() => { for (const panel of panels) panel.disconnect(); for (const timer of timers) clearInterval(timer); });
   assert.deepEqual({ ...doc.documentElement.dataset }, {
-    ylhBuild: 'sbd-sentences-v1', ylhStatus: 'waiting', ylhPhraseCount: '0', ylhUnderTwoCount: '0',
+    ylhBuild: 'youtube-brake-v5', ylhYtBrakeCompensationMs: '250', ylhStatus: 'waiting', ylhPhraseCount: '0', ylhUnderTwoCount: '0',
   }, 'content script must expose its build before the side panel connects');
-  const panels = [];
   const addPanel = () => {
     const messages = []; const onMessage = events(); const onDisconnect = events();
     let closed = false;
@@ -115,12 +117,12 @@ async function harness(t) {
     panels.push(panel); return panel;
   };
   const { messages, onMessage, disconnect } = addPanel(); await tick();
-  t.after(() => { for (const panel of panels) panel.disconnect(); for (const timer of timers) clearInterval(timer); });
   const state = () => messages.filter(m => m.version === 1).at(-1);
   const load = () => onMessage.emit({ version: 1, type: 'load', trackId: state().trackId, session: state().video.session });
-  const seek = (cue, playMode = 'single') => onMessage.emit({ version: 1, type: 'seek', videoId: state().video.videoId,
+  const seek = (cue, playMode = 'manual') => onMessage.emit({ version: 1, type: 'seek', videoId: state().video.videoId,
     session: state().video.session, trackId: state().trackId, cueId: cue.cueId, playMode });
-  return { state, load, seek, video, messages, nativeMessages, diagnostics: doc.documentElement.dataset, addPanel, disconnect, get plays() { return plays; },
+  return { state, load, seek, video, messages, nativeMessages, diagnostics: doc.documentElement.dataset, addPanel, disconnect,
+    get plays() { return plays; }, get kernelPauses() { return kernelPauses; },
     get fetched() { return fetched; }, get primeClicks() { return primeClicks; }, setNativeAuth: value => { nativeAuthAvailable = value; },
     setNativeFetchNeedsAuth: value => { nativeFetchNeedsAuth = value; },
     setNativeCache: entry => { nativeCachedEntry = entry; },
@@ -172,14 +174,30 @@ test('production YouTube display restores sentences across ASR events and preser
   assert.equal(h.state().status, 'loaded');
   assert.deepEqual(h.state().phrases.map(row => [row.text, row.startMs, row.endMs]), [
     ["It's the most famous revenge story ever written.", 0, 4_000],
-    ['How? The story continues.', 4_000, 8_000],
+    ['How?', 4_000, 5_000],
+    ['The story continues.', 5_000, 8_000],
   ]);
   assert.deepEqual(h.state().cues.map(cue => cue.text), [
     "It's the most famous revenge story ever", 'written.', 'How?', 'The story continues.',
   ]);
   assert.deepEqual({ ...h.diagnostics }, {
-    ylhBuild: 'sbd-sentences-v1', ylhStatus: 'loaded', ylhPhraseCount: '2', ylhUnderTwoCount: '0',
+    ylhBuild: 'youtube-brake-v5', ylhYtBrakeCompensationMs: '250', ylhStatus: 'loaded', ylhPhraseCount: '3', ylhUnderTwoCount: '1',
   });
+});
+
+test('production YouTube ASR phrases clamp only the derived forward overlap', async t => {
+  const h = await harness(t);
+  const asr = h.state().video.tracks.find(track => track.kind === 'asr');
+  assert.ok(asr);
+  h.select(asr.id); await tick();
+  h.setBody(JSON.stringify({ events: [
+    { tStartMs: 1_000, dDurationMs: 3_500, segs: [{ utf8: 'First sentence.' }] },
+    { tStartMs: 4_000, dDurationMs: 3_000, segs: [{ utf8: 'Second sentence.' }] },
+  ] }));
+  h.load(); await tick(); await tick();
+  assert.deepEqual(h.state().phrases.map(row => [row.startMs, row.endMs]), [[1_000, 4_000], [4_000, 7_000]]);
+  assert.deepEqual(h.state().cues.map(row => [row.startMs, row.endMs]), [[1_000, 4_500], [4_000, 7_000]],
+    'raw JSON3 cues remain unchanged for audit and non-display consumers');
 });
 
 test('production bundle merges the exact installed-real single-one and wrong fragments', async t => {
@@ -324,7 +342,7 @@ test('playback state follows the bound player and controls update the real video
   await new Promise(resolve => setTimeout(resolve, 300));
   const playback = h.messages.filter(message => message.type === 'playback-state').at(-1);
   assert.deepEqual(playback, { type: 'playback-state', videoId: h.state().video.videoId, session: h.state().video.session,
-    trackId: h.state().trackId, currentTimeMs: 12240, playing: true, rate: 1.5 });
+    trackId: h.state().trackId, currentTimeMs: 12240, playing: true, rate: 1.5, playMode: 'auto' });
 });
 
 test('YouTube playback controls reject a stale subtitle track binding', async t => {
@@ -344,48 +362,83 @@ test('YouTube does not publish invalid media clock values to the side panel', as
   assert.equal(h.messages.filter(message => message.type === 'playback-state').length, count);
 });
 
-test('single, loop, and all playback modes enforce Enjoy-compatible segment boundaries', async t => {
+test('YouTube manual and auto modes enforce distinct sentence boundaries', async t => {
   const h = await harness(t); await nativeCues(h, [1_000, 2_000, 3_000]);
-  const [single, loop, all] = h.state().cues;
+  const [manual, auto] = h.state().cues;
 
-  h.seek(single, 'single'); await tick();
-  h.video.currentTime = single.endMs / 1000 + .03;
+  h.seek(manual, 'manual'); await tick(); await tick();
+  // No timeupdate event is emitted: the controller-owned 12ms poller must be
+  // sufficient to catch YouTube's dedicated 250ms lead threshold.
+  h.video.currentTime = manual.endMs / 1000 - .251;
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(h.video.paused, false);
+  h.video.currentTime = manual.endMs / 1000 - .250;
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, true);
-  assert.equal(h.video.currentTime, single.startMs / 1000);
+  const manualActualMs = h.video.currentTime * 1000;
+  assert.ok(Math.abs(manualActualMs - manual.endMs) <= 20,
+    `manual brake drift ${manualActualMs - manual.endMs}ms exceeds ±20ms`);
+  assert.equal(h.diagnostics.ylhBrakeMode, 'manual');
+  assert.equal(h.diagnostics.ylhBrakeTrigger, 'poller');
+  assert.equal(Number(h.diagnostics.ylhBrakePollIntervalMs), 12);
+  assert.equal(Number(h.diagnostics.ylhBrakeLeadMs), 250);
+  assert.ok(h.kernelPauses >= 1, 'YouTube player pauseVideo() must be invoked at the boundary');
+  assert.ok(Math.abs(Number(h.diagnostics.ylhBrakeDriftMs)) <= 20);
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(h.video.paused, true);
 
-  const playsBeforeLoop = h.plays;
-  h.seek(loop, 'loop'); await tick();
-  h.video.currentTime = loop.endMs / 1000 + .03;
-  await new Promise(resolve => setTimeout(resolve, 680));
-  assert.equal(h.video.currentTime, loop.startMs / 1000);
-  assert.equal(h.video.paused, false);
-  assert.equal(h.plays, playsBeforeLoop + 2);
-
-  h.seek(all, 'all'); await tick();
-  h.video.currentTime = all.endMs / 1000 + .03;
+  h.seek(auto, 'auto'); await tick(); await tick();
+  h.video.currentTime = auto.endMs / 1000 + .03;
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, false);
-  assert.ok(h.video.currentTime > all.endMs / 1000);
+  assert.ok(h.video.currentTime > auto.endMs / 1000);
 });
 
-test('YouTube follow mode pauses at a sentence end and can advance immediately to the next sentence', async t => {
+test('YouTube previous navigation enters manual and play atomically returns to auto', async t => {
   const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
   const [first, second] = h.state().cues;
-  h.seek(first, 'follow'); await tick();
+  h.send({ version: 1, type: 'seek', cueId: first.cueId, playMode: 'auto', intent: 'previous',
+    videoId: h.state().video.videoId, session: h.state().video.session });
+  await tick(); await tick();
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'manual');
   h.video.currentTime = first.endMs / 1000;
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, true);
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(h.video.currentTime, first.endMs / 1000);
   h.send({ version: 1, type: 'playback-toggle', videoId: h.state().video.videoId, session: h.state().video.session });
-  await tick();
-  assert.equal(h.video.currentTime, second.startMs / 1000);
+  await new Promise(resolve => setTimeout(resolve, 280));
+  assert.equal(h.video.currentTime, first.endMs / 1000);
   assert.equal(h.video.paused, false);
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
 });
 
-test('switching YouTube subtitle track cancels the previous loop boundary', async t => {
+test('YouTube shadowing pauses exactly, waits the phrase duration, and auto-plays the next phrase', async t => {
+  const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
+  const [first, second] = h.state().cues;
+  h.seek(first, 'shadowing'); await tick(); await tick();
+  h.video.currentTime = first.endMs / 1000 - .250;
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const brakeActualMs = Number(h.diagnostics.ylhBrakeActualMs);
+  assert.equal(h.diagnostics.ylhBrakeMode, 'shadowing');
+  assert.equal(h.diagnostics.ylhBrakeTrigger, 'poller');
+  assert.ok(Math.abs(brakeActualMs - first.endMs) <= 20,
+    `shadowing brake drift ${brakeActualMs - first.endMs}ms exceeds ±20ms`);
+  for (let attempt = 0; attempt < 100 && !h.messages.some(message => message.type === 'shadowing-cycle'); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const cycle = h.messages.find(message => message.type === 'shadowing-cycle');
+  assert.ok(cycle); assert.equal(cycle.expectedWaitMs, first.endMs - first.startMs);
+  assert.ok(Math.abs(cycle.waitErrorMs) <= 50, `actual wait error ${cycle.waitErrorMs}ms`);
+  assert.equal(cycle.boundaryErrorMs, 0);
+  assert.equal(h.video.currentTime, second.startMs / 1000); assert.equal(h.video.paused, false);
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'shadowing');
+});
+
+test('switching YouTube subtitle track destroys the previous manual boundary', async t => {
   const h = await harness(t); await nativeCues(h, [1_000, 2_000]);
   const phrase = h.state().cues[0];
-  h.seek(phrase, 'loop'); await tick();
+  h.seek(phrase, 'manual'); await tick(); await tick();
   h.select(h.state().video.tracks[1].id); await tick();
   h.video.currentTime = phrase.endMs / 1000 + .05;
   await new Promise(resolve => setTimeout(resolve, 120));
@@ -396,7 +449,7 @@ test('switching YouTube subtitle track cancels the previous loop boundary', asyn
 test('a rejected YouTube play clears its pending segment boundary and reports without an unhandled rejection', async t => {
   const h = await harness(t); await nativeCues(h, [1_000]);
   h.video.play = async () => { throw new Error('synthetic autoplay rejection'); };
-  h.seek(h.state().cues[0], 'loop'); await tick();
+  h.seek(h.state().cues[0], 'manual'); await tick(); await tick();
   assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /未完成/);
   h.video.paused = false;
   h.video.currentTime = h.state().cues[0].endMs / 1000 + .05;
@@ -404,35 +457,36 @@ test('a rejected YouTube play clears its pending segment boundary and reports wi
   assert.ok(h.video.currentTime > h.state().cues[0].endMs / 1000);
 });
 
-test('YouTube clamps a segment end to media duration before enforcing single playback', async t => {
+test('YouTube clamps a manual sentence end to media duration', async t => {
   const h = await harness(t); await nativeCues(h, [1_000]);
   h.video.duration = 1.2;
-  h.seek(h.state().cues[0], 'single'); await tick();
+  h.seek(h.state().cues[0], 'manual'); await tick(); await tick();
   h.video.currentTime = 1.21;
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, true);
-  assert.equal(h.video.currentTime, 1);
+  assert.equal(h.video.currentTime, 1.2);
 });
 
-test('switching from a loop pause to continuous mode resumes immediately instead of remaining stuck', async t => {
+test('switching from manual waiting to auto resumes immediately', async t => {
   const h = await harness(t); await nativeCues(h, [1_000]); const cue = h.state().cues[0];
-  h.seek(cue, 'loop'); await tick(); h.video.currentTime = cue.endMs / 1000 + .01;
+  h.seek(cue, 'manual'); await tick(); await tick(); h.video.currentTime = cue.endMs / 1000 + .01;
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, true);
-  h.send({ version: 1, type: 'playback-mode', mode: 'all', videoId: h.state().video.videoId, session: h.state().video.session });
+  h.send({ version: 1, type: 'playback-mode', mode: 'auto', videoId: h.state().video.videoId, session: h.state().video.session });
   await tick(); assert.equal(h.video.paused, false);
 });
 
-test('a rejected YouTube loop resume stops cleanly without an unhandled promise rejection', async t => {
-  const h = await harness(t); await nativeCues(h, [1_000]); const cue = h.state().cues[0];
-  let calls = 0;
-  h.video.play = async () => { calls++; if (calls > 1) throw new Error('synthetic loop resume rejection'); h.video.paused = false; };
-  h.seek(cue, 'loop'); await tick(); h.video.currentTime = cue.endMs / 1000 + .01;
-  await new Promise(resolve => setTimeout(resolve, 680));
-  assert.match(h.messages.filter(message => message.type === 'playback').at(-1).message, /已停止循环/);
-  h.video.paused = false; h.video.currentTime = cue.endMs / 1000 + .1;
-  await new Promise(resolve => setTimeout(resolve, 120));
-  assert.ok(h.video.currentTime > cue.endMs / 1000);
+test('rapid YouTube previous/next seeks leave only the last manual target active', async t => {
+  const h = await harness(t); await nativeCues(h, [1_000, 2_000]);
+  const [first, second] = h.state().cues;
+  h.send({ version: 1, type: 'seek', cueId: first.cueId, playMode: 'auto', intent: 'previous',
+    videoId: h.state().video.videoId, session: h.state().video.session });
+  h.send({ version: 1, type: 'seek', cueId: second.cueId, playMode: 'auto', intent: 'next',
+    videoId: h.state().video.videoId, session: h.state().video.session });
+  await tick(); await tick(); await tick();
+  assert.equal(h.video.currentTime, second.startMs / 1000);
+  const playback = h.messages.filter(message => message.type === 'playback-state').at(-1);
+  assert.equal(playback.playMode, 'manual'); assert.equal(playback.manualStartMs, second.startMs);
 });
 test('HTTP success with zero-byte content produces an explicit error', async t => {
   const h = await harness(t); h.setBody(''); h.load(); await tick();
