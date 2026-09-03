@@ -36,7 +36,7 @@ export default defineContentScript({
         const result = await biliTracks(current.bvid, metadata.aid, metadata.cid, controller.signal);
         const latest = biliVideo(location.href);
         if (!latest || latest.bvid !== current.bvid || latest.page !== current.page) throw new Error('B站视频分 P 已切换');
-        reply({ metadata, tracks: result.tracks, needLogin: result.needLogin });
+        reply({ metadata, tracks: result.tracks, needLogin: result.needLogin, usedAiFallback: result.usedAiFallback });
       } catch (error) {
         reply({ error: error instanceof Error && error.name === 'AbortError' ? 'B站字幕轨请求超时' : error instanceof Error ? error.message : 'B站字幕轨请求失败' });
       } finally { clearTimeout(timeout); }

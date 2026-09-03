@@ -1,6 +1,7 @@
 import { record, type RawCue } from './captions.ts';
 import { groupSentences, type CaptionGroup } from './sentence-groups.ts';
 import { signedPlayerUrl } from './bilibili-wbi.ts';
+import { selectBilibiliSubtitlePriority } from './bilibili-ocr.ts';
 import type { TimedPhrase } from './protocol.ts';
 
 export type BiliTrack = { id: string; name: string; language: string; kind: 'manual' | 'asr'; url: string;
@@ -91,16 +92,17 @@ export async function biliMetadata(bvid: string, page: number, signal?: AbortSig
   if (!Number.isSafeInteger(aid) || aid <= 0 || !Number.isSafeInteger(cid) || cid <= 0) throw new Error('B站视频缺少有效 aid/cid');
   return { aid, cid, title: String(target?.part ?? data.title ?? '').slice(0, 1000) };
 }
-export async function biliTracks(bvid: string, aid: number, cid: number, signal?: AbortSignal): Promise<{ tracks: BiliTrack[]; needLogin: boolean }> {
+export async function biliTracks(bvid: string, aid: number, cid: number, signal?: AbortSignal): Promise<{ tracks: BiliTrack[]; needLogin: boolean; usedAiFallback: boolean }> {
   const data = await envelope(await signedPlayerUrl({ aid, cid, bvid }, signal), signal);
   const raw = record(data.subtitle) && Array.isArray(data.subtitle.subtitles) ? data.subtitle.subtitles : [];
-  const tracks: BiliTrack[] = raw.filter(record).flatMap((item, index) => {
+  const usable = raw.filter(item => record(item) && subtitleUrl(item.subtitle_url));
+  const selection = selectBilibiliSubtitlePriority(usable);
+  const tracks: BiliTrack[] = selection.selectedTracks.filter(record).flatMap((item, index) => {
     const url = subtitleUrl(item.subtitle_url);
     if (!url) return [];
     const language = String(item.lan ?? '').slice(0, 100), name = String(item.lan_doc ?? (language || `字幕 ${index + 1}`)).slice(0, 500);
-    const automatic = Number(item.ai_status) > 0 || Number(item.ai_type) > 0 || language.startsWith('ai-');
-    const kind: BiliTrack['kind'] = automatic ? 'asr' : 'manual';
-    return [{ id: `bili:${String(item.id ?? index).slice(0, 450)}:${index}`, name, language, kind, url }];
+    return [{ id: `bili:${String(item.id ?? index).slice(0, 450)}:${index}`, name, language,
+      kind: selection.usedAiFallback ? 'asr' : 'manual', url }];
   });
   const preferred = (items: BiliTrack[]) => [...items].sort((a, b) => Number(a.kind === 'asr') - Number(b.kind === 'asr'))[0];
   const english = preferred(tracks.filter(track => /^en(?:-|$)/i.test(track.language)));
@@ -111,7 +113,7 @@ export async function biliTracks(bvid: string, aid: number, cid: number, signal?
       language: `${english.language}+${chinese.language}`, kind: english.kind === 'manual' && chinese.kind === 'manual' ? 'manual' : 'asr',
       url: english.url, secondary: { id: chinese.id, name: chinese.name, language: chinese.language, url: chinese.url } });
   }
-  return { tracks, needLogin: Boolean(data.need_login_subtitle) };
+  return { tracks, needLogin: Boolean(data.need_login_subtitle), usedAiFallback: selection.usedAiFallback };
 }
 export function chooseBiliTrack(tracks: BiliTrack[]) {
   const preference = (track: BiliTrack) => {

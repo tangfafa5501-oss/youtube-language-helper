@@ -14,6 +14,7 @@
     "typecheck": "wxt prepare && tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:integration": "npm run build && node --test tests/integration/*.test.mjs",
+    "verify:bilibili-ocr": "npm run typecheck && npm test && npm run test:integration",
     "postinstall": "wxt prepare"
   },
   "dependencies": {

@@ -10,7 +10,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const events = () => { const listeners = new Set(); return { addListener: fn => listeners.add(fn), emit: value => { for (const fn of listeners) fn(value); } }; };
 
 async function harness(t, { withMain = false, separateTracks = false, delayEnglish = false, metadataDelayMs = 0,
-  metadataDelays = [], pageCid = '2', failPlayerCount = 0 } = {}) {
+  metadataDelays = [], pageCid = '2', failPlayerCount = 0, aiOnly = false } = {}) {
   const timers = new Set(), connect = events(), document = new EventTarget();
   document.documentElement = { dataset: {} };
   const requests = [];
@@ -37,15 +37,22 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
     if (value.includes('/x/web-interface/nav')) return Response.json({ code: 0, data: { wbi_img: { img_url: `https://i0.hdslb.com/${img}.png`, sub_url: `https://i0.hdslb.com/${sub}.png` } } });
     if (value.includes('/x/player/wbi/v2')) {
       if (remainingPlayerFailures-- > 0) return new Response('', { status: 503 });
-      return Response.json({ code: 0, data: { subtitle: { subtitles: separateTracks ? [
-      { id: 1, lan: 'en-US', lan_doc: 'English', subtitle_url: '//i0.hdslb.com/en.json' },
-      { id: 2, lan: 'zh-CN', lan_doc: '中文（中国）', subtitle_url: '//i0.hdslb.com/zh-mixed.json' },
-      { id: 3, lan: 'zh-Hans', lan_doc: '中文（简体）', subtitle_url: '//i0.hdslb.com/zh.json' },
+      return Response.json({ code: 0, data: { subtitle: { subtitles: aiOnly ? [
+      { id: 9, is_ai: true, lan: 'ai-zh', lan_doc: '中文 (AI)', ai_status: 1, subtitle_url: '//i0.hdslb.com/ai.json' },
+    ] : separateTracks ? [
+      { id: 9, is_ai: true, lan: 'ai-zh', lan_doc: '中文 (AI)', ai_status: 1, subtitle_url: '//i0.hdslb.com/ai.json' },
+      { id: 1, is_ai: false, lan: 'en-US', lan_doc: 'English', subtitle_url: '//i0.hdslb.com/en.json' },
+      { id: 2, is_ai: false, lan: 'zh-CN', lan_doc: '中文（中国）', subtitle_url: '//i0.hdslb.com/zh-mixed.json' },
+      { id: 3, is_ai: false, lan: 'zh-Hans', lan_doc: '中文（简体）', subtitle_url: '//i0.hdslb.com/zh.json' },
     ] : [
-      { id: 1, lan: 'en-US', lan_doc: 'English', subtitle_url: '//i0.hdslb.com/en.json' },
-      { id: 2, lan: 'zh-CN', lan_doc: '中英双语', subtitle_url: '//i0.hdslb.com/bilingual.json' },
+      { id: 1, is_ai: false, lan: 'en-US', lan_doc: 'English', subtitle_url: '//i0.hdslb.com/en.json' },
+      { id: 2, is_ai: false, lan: 'zh-CN', lan_doc: '中英双语', subtitle_url: '//i0.hdslb.com/bilingual.json' },
     ] } } });
     }
+    if (value.includes('ai.json')) return Response.json({ body: [
+      { from: 1, to: 4, content: '这是 B站 AI 保底字幕。' },
+      { from: 4, to: 7, content: '没有人工轨时仍可立即读取。' },
+    ] });
     if (value.includes('en.json')) { if (delayEnglish) await sleep(80); return Response.json({ body: [
       { from: 1, to: 4, content: 'Hello students.' }, { from: 4, to: 7, content: 'Second line.' },
     ] }); }
@@ -88,6 +95,19 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
     disconnect: port.disconnect };
 }
 
+test('production Bilibili bridge automatically fetches an AI track when no manual track exists', async t => {
+  const h = await harness(t, { withMain: true, aiOnly: true });
+  assert.equal(h.state().status, 'loaded');
+  assert.equal(h.state().source, 'bilibili');
+  assert.equal(h.state().video.tracks.length, 1);
+  assert.equal(h.state().video.tracks[0].kind, 'asr');
+  assert.equal(h.state().video.tracks[0].name, '中文 (AI)');
+  assert.equal(h.state().cues[0].text, '这是 B站 AI 保底字幕。');
+  assert.match(h.state().message, /B 站字幕已就绪/);
+  assert.equal(h.requests.filter(url => url.includes('ai.json')).length, 1);
+  assert.equal(h.messages.some(message => message.source === 'bilibili-ocr' || message.ocr), false);
+});
+
 test('production Bilibili page bridge keeps website primary and secondary tracks independent', async t => {
   const h = await harness(t, { withMain: true, separateTracks: true });
   assert.equal(h.state().status, 'loaded');
@@ -100,6 +120,9 @@ test('production Bilibili page bridge keeps website primary and secondary tracks
   assert.equal(h.state().secondaryTrackId, h.state().video.tracks.find(track => track.language === 'zh-Hans').id);
   assert.equal(h.requests.filter(url => url.includes('/x/web-interface/view')).length, 0);
   assert.equal(h.requests.filter(url => url.includes('/x/player/wbi/v2')).length, 1);
+  assert.equal(h.state().video.tracks.every(track => track.kind === 'manual'), true);
+  assert.equal(h.state().video.tracks.some(track => /AI/i.test(track.name)), false);
+  assert.equal(h.requests.some(url => url.includes('ai.json')), false);
 });
 
 test('a slow page-session bridge is acknowledged and never triggers duplicate fallback requests', async t => {

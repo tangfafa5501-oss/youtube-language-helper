@@ -12,7 +12,7 @@ export default defineContentScript({
     let state: State = emptyState(), locationKey = '', loadingKey = '', settledKey = '', refreshGeneration = 0, controller: AbortController | null = null;
     async function pageMetadataTracks(current: { bvid: string; page: number }) {
       const requestId = crypto.randomUUID();
-      return await new Promise<{ metadata: Awaited<ReturnType<typeof biliMetadata>>; tracks: BiliTrack[]; needLogin: boolean } | null>((resolve, reject) => {
+      return await new Promise<{ metadata: Awaited<ReturnType<typeof biliMetadata>>; tracks: BiliTrack[]; needLogin: boolean; usedAiFallback: boolean } | null>((resolve, reject) => {
         let timeout = setTimeout(() => { removeEventListener('message', receive); resolve(null); }, 1_000);
         function receive(event: MessageEvent) {
           const message = event.data;
@@ -27,8 +27,11 @@ export default defineContentScript({
           if (typeof message.error === 'string') { reject(new Error(message.error)); return; }
           if (!record(message.metadata) || !Number.isFinite(message.metadata.aid) || !Number.isFinite(message.metadata.cid)
             || typeof message.metadata.title !== 'string' || message.metadata.title.length > 1000 || !Array.isArray(message.tracks)
-            || message.tracks.length > 200 || !message.tracks.every(isBiliTrack)) { reject(new Error('B站页面字幕响应结构异常')); return; }
-          resolve({ metadata: message.metadata as Awaited<ReturnType<typeof biliMetadata>>, tracks: message.tracks, needLogin: Boolean(message.needLogin) });
+            || message.tracks.length > 200 || !message.tracks.every(isBiliTrack) || typeof message.usedAiFallback !== 'boolean') {
+            reject(new Error('B站页面字幕响应结构异常')); return;
+          }
+          resolve({ metadata: message.metadata as Awaited<ReturnType<typeof biliMetadata>>, tracks: message.tracks,
+            needLogin: Boolean(message.needLogin), usedAiFallback: message.usedAiFallback });
         }
         addEventListener('message', receive);
         window.postMessage({ channel: BILI_CHANNEL, direction: 'request', version: 1, type: 'metadata-tracks', requestId,
@@ -112,7 +115,9 @@ export default defineContentScript({
         state = { ...state, status: 'loaded', cues, secondaryCues, phrases, eventCount: cues.length, controlEventCount: 0,
           secondaryStatus: secondary ? 'loaded' : 'idle', secondaryMessage: secondary ? `${secondary.name} 已就绪` : '',
           message: `B 站字幕已就绪：${cues.length} 条原始字幕，${phrases.length} 个可定位语段`,
-          timingMessage: '使用 B 站原始 from/to 时间；句界在单条字幕内时不伪造新起点。' }; publish();
+          timingMessage: primary.kind === 'asr'
+            ? `未发现人工字幕，当前使用 B站 ${primary.name} 作为保底；保留原始 from/to 时间。`
+            : '使用 B站人工字幕原始 from/to 时间；句界在单条字幕内时不伪造新起点。' }; publish();
       } catch (error) {
         if (!request.signal.aborted && state.video?.session === session) {
           state = { ...state, status: 'error', cues: [], secondaryCues: [], phrases: [], secondaryStatus: 'error',
@@ -132,7 +137,7 @@ export default defineContentScript({
         const request = new AbortController(); controller = request;
         const pageResult = await pageMetadataTracks(current);
         const info = pageResult?.metadata ?? await biliMetadata(current.bvid, current.page, request.signal);
-        const { tracks, needLogin } = pageResult ?? await biliTracks(current.bvid, info.aid, info.cid, request.signal);
+        const { tracks, needLogin, usedAiFallback } = pageResult ?? await biliTracks(current.bvid, info.aid, info.cid, request.signal);
         if (request.signal.aborted || locationKey !== nextKey || refreshToken !== refreshGeneration) return;
         const selectableTracks = tracks.filter(track => !track.secondary);
         urls.clear(); for (const track of selectableTracks) urls.set(track.id, track);
@@ -140,8 +145,12 @@ export default defineContentScript({
           fingerprint: JSON.stringify([track.id, track.name, track.language, track.kind]) }));
         const selected = chooseBiliPair(selectableTracks);
         state = { ...emptyState(), video: { videoId: current.bvid, title: info.title || document.title, session, tracks: publicTracks,
-          availability: selectableTracks.length ? '' : needLogin ? 'B 站字幕需要登录后读取' : '当前 B 站视频没有可读取的官方字幕轨', platform: 'bilibili' },
-          status: selectableTracks.length ? 'ready' : 'error', message: selectableTracks.length ? '已发现 B 站字幕轨' : needLogin ? '请先在 B 站登录，再刷新视频读取字幕' : '当前视频没有可读取的官方字幕轨',
+          availability: selectableTracks.length
+            ? usedAiFallback ? '未发现人工字幕，已自动使用 B站 AI 字幕' : ''
+            : needLogin ? 'B站字幕需要登录后读取' : '当前 B站视频没有可读取的字幕轨', platform: 'bilibili' },
+          status: selectableTracks.length ? 'ready' : 'error', message: selectableTracks.length
+            ? usedAiFallback ? `未发现人工字幕，已自动使用 B站 ${selected.primary?.name ?? 'AI 字幕'}` : '已发现 B站人工字幕轨'
+            : needLogin ? '请先在 B站登录，再刷新视频读取字幕' : '当前视频没有可读取的字幕轨',
           trackId: selected.primary?.id ?? null, primaryTrackId: selected.primary?.id, secondaryTrackId: selected.secondary?.id ?? null,
           secondaryStatus: selected.secondary ? 'loading' : 'idle', cues: [], secondaryCues: [], eventCount: 0, controlEventCount: 0 };
         settledKey = nextKey;
