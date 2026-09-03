@@ -8,7 +8,7 @@ import * as Slider from '@radix-ui/react-slider';
 import { ArrowLeft, BookOpen, Check, ChevronDown, CircleHelp, Keyboard, Languages, Mic, MoreVertical,
   Pause, Play, RefreshCw, Settings, SkipBack, SkipForward, X } from 'lucide-react';
 import { SettingsView } from '../../components/settings-view';
-import { adjacentPlaybackRate, PLAYER_SHORTCUTS, PLAYBACK_RATES, PORT, emptyState, type PlayMode, type State, type Track } from '../../lib/protocol';
+import { adjacentPlaybackRate, PLAYBACK_RATES, PORT, emptyState, type PlayMode, type State, type Track } from '../../lib/protocol';
 import { connectPanel } from '../../lib/panel-connection';
 import { record } from '../../lib/captions';
 import { SERVICE_CHANNEL, type PublicSettings, type ServiceReply } from '../../lib/settings';
@@ -16,6 +16,7 @@ import { preferredTranscriptTrack } from '../../lib/transcript-selection';
 import { activeTimedRowIndex, adjacentPlayableRowIndex, matchesPlaybackBinding } from '../../lib/playback-view';
 import { secondaryTextForRange } from '../../lib/subtitle-lanes';
 import { applyTheme } from '../../lib/theme';
+import { isShortcutAction, shortcutAction, type ShortcutAction } from '../../lib/shortcuts';
 import './style.css';
 
 const defaultSettings: PublicSettings = { language: 'en', theme: 'system', displayMode: 'phrases' };
@@ -136,6 +137,7 @@ function App() {
   const connectionRef = useRef<ReturnType<typeof connectPanel> | null>(null);
   const viewRef = useRef({ videoId: '', session: '', track: '' });
   const phraseRowsRef = useRef<NonNullable<State['phrases']>>([]);
+  const shortcutHandlerRef = useRef<(action: ShortcutAction) => boolean>(() => false);
 
   useEffect(() => {
     let active = true;
@@ -163,6 +165,10 @@ function App() {
       },
       message: (value, tabId) => {
         if (!record(value)) return;
+        if (value.type === 'bilibili-shortcut') {
+          if (matchesPlaybackBinding(value, viewRef.current) && isShortcutAction(value.action)) shortcutHandlerRef.current(value.action);
+          return;
+        }
         if (value.type === 'playback' && typeof value.message === 'string') {
           if (matchesPlaybackBinding(value, viewRef.current)) setPlayback(value.message); return;
         }
@@ -197,7 +203,7 @@ function App() {
   }, [connection]);
 
   const video = state.video;
-  const isBilibili = video?.platform === 'bilibili';
+  const isBilibili = state.source === 'bilibili' || video?.platform === 'bilibili';
   const preferredTrack = preferredTranscriptTrack(video?.tracks ?? [], settings.language) ?? video?.tracks[0];
   const primaryTrackId = video?.tracks.some(track => track.id === state.primaryTrackId) ? state.primaryTrackId! : preferredTrack?.id ?? '';
   const primaryTrack = video?.tracks.find(track => track.id === primaryTrackId) ?? preferredTrack;
@@ -309,7 +315,7 @@ function App() {
       autoRequestedSessionRef.current = `${video.session}:${primaryTrack.id}`;
       connectionRef.current?.send({ version: 1, type: 'load', force: true, trackId: primaryTrack.id,
         videoId: video.videoId, session: video.session, userInitiated: true });
-    }
+    } else setConnection(value => value + 1);
   };
 
   useLayoutEffect(() => {
@@ -325,25 +331,27 @@ function App() {
     } else delete root.dataset.nativeRequestCompletedAt;
   }, [echoRows.length, state.status, state.nativeTimeline, video?.videoId]);
 
+  shortcutHandlerRef.current = action => {
+    if (view !== 'reader' || shortcutsOpen || guideOpen || state.status !== 'loaded') return false;
+    if (action === 'help') setShortcutsOpen(true);
+    else if (action === 'slower') changeRate(-1);
+    else if (action === 'faster') changeRate(1);
+    else if (action === 'play') togglePlayback();
+    else if (action === 'previous' && previousIndex >= 0) activateEchoRow(previousIndex, 'previous');
+    else if (action === 'replay' && navigationIndex >= 0) activateEchoRow(navigationIndex, 'replay');
+    else if (action === 'next' && nextIndex >= 0) activateEchoRow(nextIndex, 'next');
+    else if (action === 'shadowing') toggleShadowing();
+    else if (action === 'reserved') reserved('听写或跟读录音');
+    else return false;
+    return true;
+  };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const target = event.target instanceof Element ? event.target : null;
-      const editable = target?.closest('input, textarea, select, [contenteditable="true"], [role="menuitem"], [role="option"]');
-      const toolbarButton = target?.closest('button:not(.echo-cue)');
-      if (editable || toolbarButton || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (event.key === '?') { event.preventDefault(); setShortcutsOpen(true); return; }
-      if (event.shiftKey && event.code === PLAYER_SHORTCUTS.decreaseRate) { event.preventDefault(); changeRate(-1); return; }
-      if (event.shiftKey && event.code === PLAYER_SHORTCUTS.increaseRate) { event.preventDefault(); changeRate(1); return; }
-      if (event.shiftKey) return;
-      if (event.code === PLAYER_SHORTCUTS.playOrPause || event.code === 'KeyK') { event.preventDefault(); togglePlayback(); }
-      else if (event.code === PLAYER_SHORTCUTS.previous && previousIndex >= 0) { event.preventDefault(); activateEchoRow(previousIndex, 'previous'); }
-      else if (event.code === PLAYER_SHORTCUTS.replay && navigationIndex >= 0) { event.preventDefault(); activateEchoRow(navigationIndex, 'replay'); }
-      else if (event.code === PLAYER_SHORTCUTS.next && nextIndex >= 0) { event.preventDefault(); activateEchoRow(nextIndex, 'next'); }
-      else if (event.code === PLAYER_SHORTCUTS.toggleEcho) { event.preventDefault(); toggleShadowing(); }
-      else if ([PLAYER_SHORTCUTS.toggleDictation, PLAYER_SHORTCUTS.record, PLAYER_SHORTCUTS.playRecording, 'KeyV'].includes(event.code as never)) { event.preventDefault(); reserved('听写或跟读录音'); }
+      const action = shortcutAction(event);
+      if (action && shortcutHandlerRef.current(action)) event.preventDefault();
     };
     addEventListener('keydown', onKey); return () => removeEventListener('keydown', onKey);
-  }, [activeIndex, selectedIndex, previousIndex, nextIndex, navigationIndex, rate, playMode, echoRows]);
+  }, []);
 
   if (view === 'settings') return <SettingsView onBack={() => setView('reader')} onSettings={next => { setSettings(next); applyTheme(next.theme); }}/>
 
@@ -409,7 +417,7 @@ function App() {
     {video ? <div className="echo-connected"><span>✓</span>视频已连接</div> : null}
     <section className="echo-empty">
       {fetching ? <div className="echo-load-card"><div className="echo-load-spinner" aria-hidden="true"/><h1>正在准备字幕</h1><p>{state.message}</p><div className="echo-progress"><span/></div><small>只读取视频已有字幕，不生成转录</small></div>
-      : state.status === 'error' ? <div className="echo-load-card echo-message-card failed"><div className="echo-state-icon failed">!</div><h1>字幕获取失败</h1><p role="alert">{state.message}</p><div className="echo-message-actions"><button className="echo-primary" onClick={refreshCaptions}>重试 YouTube 原生字幕</button></div></div>
+      : state.status === 'error' ? <div className="echo-load-card echo-message-card failed"><div className="echo-state-icon failed">!</div><h1>字幕获取失败</h1><p role="alert">{state.message}</p><div className="echo-message-actions"><button className="echo-primary" onClick={refreshCaptions}>{isBilibili ? '重试 B站字幕' : '重试 YouTube 原生字幕'}</button></div></div>
       : <div className="echo-load-card echo-message-card"><div className="echo-state-icon">V</div><h1>{video?.title || '打开一个视频'}</h1><p>{state.message}</p><button className="echo-primary" onClick={() => setConnection(value => value + 1)}>重新连接</button></div>}
     </section>
   </main>;

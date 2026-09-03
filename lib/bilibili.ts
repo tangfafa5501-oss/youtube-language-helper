@@ -39,7 +39,8 @@ function subtitleUrl(value: unknown) {
   if (typeof value !== 'string' || value.length > 4000) return null;
   try {
     const url = new URL(value.startsWith('//') ? `https:${value}` : value);
-    if (url.protocol !== 'https:' || !(url.hostname === 'bilibili.com' || url.hostname.endsWith('.bilibili.com') || url.hostname.endsWith('.hdslb.com'))) return null;
+    if (url.protocol !== 'https:' || url.username || url.password || url.port
+      || !(url.hostname === 'bilibili.com' || url.hostname.endsWith('.bilibili.com') || url.hostname.endsWith('.hdslb.com'))) return null;
     return url.href;
   } catch { return null; }
 }

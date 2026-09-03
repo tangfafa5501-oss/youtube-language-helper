@@ -1,4 +1,7 @@
-import { biliCues, biliMetadata, biliPhrases, biliTracks, biliVideo, chooseBiliPair, isBiliTrack, type BiliTrack } from '../lib/bilibili';
+import { biliPhrases, biliVideo, chooseBiliPair, isBiliTrack, type BiliTrack } from '../lib/bilibili';
+import { requestBilibili, type BiliMetadataTracks } from '../lib/bilibili-network';
+import { shortcutAction } from '../lib/shortcuts';
+import type { RawCue } from '../lib/captions';
 import { PrecisePlaybackController, type PlaybackBoundary } from '../lib/playback-machine';
 import { PORT, emptyState, isPlaybackRate, type PlayMode, type State, type Track } from '../lib/protocol';
 import { record } from '../lib/captions';
@@ -9,10 +12,10 @@ export default defineContentScript({
     const BILI_CHANNEL = 'ylh-bilibili-page-v1';
     const clients = new Set<Browser.runtime.Port>();
     const urls = new Map<string, BiliTrack>();
-    let state: State = emptyState(), locationKey = '', loadingKey = '', settledKey = '', refreshGeneration = 0, controller: AbortController | null = null;
+    let state: State = { ...emptyState(), source: 'bilibili' }, locationKey = '', loadingKey = '', settledKey = '', refreshGeneration = 0, controller: AbortController | null = null;
     async function pageMetadataTracks(current: { bvid: string; page: number }) {
       const requestId = crypto.randomUUID();
-      return await new Promise<{ metadata: Awaited<ReturnType<typeof biliMetadata>>; tracks: BiliTrack[]; needLogin: boolean; usedAiFallback: boolean } | null>((resolve, reject) => {
+      return await new Promise<BiliMetadataTracks | null>((resolve, reject) => {
         let timeout = setTimeout(() => { removeEventListener('message', receive); resolve(null); }, 1_000);
         function receive(event: MessageEvent) {
           const message = event.data;
@@ -30,7 +33,7 @@ export default defineContentScript({
             || message.tracks.length > 200 || !message.tracks.every(isBiliTrack) || typeof message.usedAiFallback !== 'boolean') {
             reject(new Error('B站页面字幕响应结构异常')); return;
           }
-          resolve({ metadata: message.metadata as Awaited<ReturnType<typeof biliMetadata>>, tracks: message.tracks,
+          resolve({ metadata: message.metadata as BiliMetadataTracks['metadata'], tracks: message.tracks,
             needLogin: Boolean(message.needLogin), usedAiFallback: message.usedAiFallback });
         }
         addEventListener('message', receive);
@@ -96,10 +99,11 @@ export default defineContentScript({
     });
     const reset = (message = '正在读取 B 站视频…') => {
       controller?.abort(); controller = null; playback.clear('auto'); urls.clear();
-      state = { ...emptyState(), message }; publish();
+      state = { ...emptyState(), source: 'bilibili', message }; publish();
     };
     async function loadTracks(primary: BiliTrack, secondary: BiliTrack | undefined, session: string) {
       if (state.video?.session !== session) return;
+      const route = biliVideo(location.href); if (!route) return;
       controller?.abort(); const request = new AbortController(); controller = request;
       playback.clear('auto');
       state = { ...state, status: 'loading', trackId: primary.id, primaryTrackId: primary.id, secondaryTrackId: secondary?.id ?? null,
@@ -108,7 +112,8 @@ export default defineContentScript({
         cues: [], secondaryCues: [], phrases: [], message: `正在读取 B 站 ${primary.name}…` }; publish();
       try {
         const [cues, secondaryCues] = await Promise.all([
-          biliCues(primary, request.signal), secondary ? biliCues(secondary, request.signal) : Promise.resolve([]),
+          requestBilibili<RawCue[]>({ type: 'cues', ...route, track: primary }, request.signal),
+          secondary ? requestBilibili<RawCue[]>({ type: 'cues', ...route, track: secondary }, request.signal) : Promise.resolve([]),
         ]);
         const phrases = biliPhrases(cues);
         if (request.signal.aborted || state.video?.session !== session) return;
@@ -135,16 +140,19 @@ export default defineContentScript({
       const session = crypto.randomUUID();
       try {
         const request = new AbortController(); controller = request;
-        const pageResult = await pageMetadataTracks(current);
-        const info = pageResult?.metadata ?? await biliMetadata(current.bvid, current.page, request.signal);
-        const { tracks, needLogin, usedAiFallback } = pageResult ?? await biliTracks(current.bvid, info.aid, info.cid, request.signal);
+        const pageResult = await pageMetadataTracks(current).catch(error => {
+          if (error instanceof Error && /Failed to fetch|NetworkError|Load failed/i.test(error.message)) return null;
+          throw error;
+        });
+        const result = pageResult ?? await requestBilibili<BiliMetadataTracks>({ type: 'metadata-tracks', ...current }, request.signal);
+        const { metadata: info, tracks, needLogin, usedAiFallback } = result;
         if (request.signal.aborted || locationKey !== nextKey || refreshToken !== refreshGeneration) return;
         const selectableTracks = tracks.filter(track => !track.secondary);
         urls.clear(); for (const track of selectableTracks) urls.set(track.id, track);
         const publicTracks: Track[] = selectableTracks.map(track => ({ id: track.id, name: track.name, language: track.language, kind: track.kind,
           fingerprint: JSON.stringify([track.id, track.name, track.language, track.kind]) }));
         const selected = chooseBiliPair(selectableTracks);
-        state = { ...emptyState(), video: { videoId: current.bvid, title: info.title || document.title, session, tracks: publicTracks,
+        state = { ...emptyState(), source: 'bilibili', video: { videoId: current.bvid, title: info.title || document.title, session, tracks: publicTracks,
           availability: selectableTracks.length
             ? usedAiFallback ? '未发现人工字幕，已自动使用 B站 AI 字幕' : ''
             : needLogin ? 'B站字幕需要登录后读取' : '当前 B站视频没有可读取的字幕轨', platform: 'bilibili' },
@@ -158,7 +166,7 @@ export default defineContentScript({
       } catch (error) {
         if (locationKey === nextKey && refreshToken === refreshGeneration) {
           settledKey = nextKey;
-          state = { ...emptyState(), status: 'error', message: error instanceof Error ? error.message : 'B 站视频读取失败' }; publish();
+          state = { ...emptyState(), source: 'bilibili', status: 'error', message: error instanceof Error ? error.message : 'B 站视频读取失败' }; publish();
         }
       } finally { if (loadingKey === nextKey && refreshToken === refreshGeneration) loadingKey = ''; }
     }
@@ -225,6 +233,16 @@ export default defineContentScript({
       } catch { if (clients.has(port)) try { port.postMessage({ type: 'playback', message: '播放被浏览器拦截',
         videoId: binding.videoId, session: binding.session, trackId: state.trackId }); } catch { /* disconnected */ } }
     }
+    ctx.addEventListener(window, 'keydown', event => {
+      const current = biliVideo(location.href), binding = state.video;
+      if (!event.isTrusted || state.status !== 'loaded' || !binding || !current || `${current.bvid}:p${current.page}` !== settledKey) return;
+      const action = shortcutAction(event), owner = [...clients].at(-1);
+      if (!action || !owner) return;
+      // One key goes to one panel, then reuses its existing seek/playback state machine.
+      try { owner.postMessage({ type: 'bilibili-shortcut', action, videoId: binding.videoId,
+        session: binding.session, trackId: state.trackId }); } catch { clients.delete(owner); return; }
+      event.preventDefault(); event.stopImmediatePropagation();
+    }, { capture: true });
     browser.runtime.onConnect.addListener(port => {
       if (port.name !== PORT || port.sender?.id !== browser.runtime.id || port.sender?.url !== browser.runtime.getURL('/sidepanel.html')) return;
       clients.add(port); port.postMessage(state); void refresh();

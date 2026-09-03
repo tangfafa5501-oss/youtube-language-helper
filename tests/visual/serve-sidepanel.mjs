@@ -10,6 +10,7 @@ const mockScript = String.raw`
   const youtubeFixture = location.search.includes('youtube=1');
   const fragmentFixture = location.search.includes('fragments=1');
   const rawSettingsFixture = location.search.includes('settings=raw');
+  const biliErrorFixture = new URLSearchParams(location.search).get('bili-error');
   const event = () => {
     const listeners = new Set();
     return { addListener: listener => listeners.add(listener), removeListener: listener => listeners.delete(listener),
@@ -68,13 +69,18 @@ const mockScript = String.raw`
     video: { platform: 'youtube', videoId: 'X627czLUsGY', title: 'Native YouTube subtitle acceptance',
       session: 'youtube-native-acceptance-session', tracks }, trackId: 'en-gb', primaryTrackId: 'en-gb',
     secondaryTrackId: null, secondaryCues: [], secondaryStatus: 'idle', cues: [], phrases: [], eventCount: 0, controlEventCount: 0 } : bilibiliState;
-  const metrics = { nativeLoads: 0, secondaryLoads: 0 };
+  if (biliErrorFixture) state = { ...bilibiliState, status: 'error', message: 'B站后台网络请求失败',
+    video: biliErrorFixture === 'metadata' ? null : bilibiliState.video, cues: [], phrases: [] };
+  const metrics = { nativeLoads: 0, secondaryLoads: 0, refreshes: 0, commands: [] };
   globalThis.__visualMetrics = metrics;
+  globalThis.__simulateBilibiliShortcut = (action, binding = {}) => onMessage.emit({ type: 'bilibili-shortcut', action,
+    videoId: state.video?.videoId, session: state.video?.session, trackId: state.trackId, ...binding });
   const exposeMetrics = () => { document.documentElement.dataset.nativeLoads = String(metrics.nativeLoads);
     document.documentElement.dataset.secondaryLoads = String(metrics.secondaryLoads); };
   exposeMetrics();
   const publish = () => queueMicrotask(() => onMessage.emit(structuredClone(state)));
   const portObject = { onMessage, onDisconnect, disconnect: () => onDisconnect.emit(), postMessage: message => {
+    metrics.commands.push(structuredClone(message));
     if (message.type === 'seek') {
       const row = phrases.find(item => item.id === message.phraseId) || cues.find(item => item.cueId === message.cueId);
       playing = true; queueMicrotask(() => onMessage.emit({ type: 'playback-state', videoId: state.video.videoId,
@@ -102,8 +108,9 @@ const mockScript = String.raw`
       setTimeout(() => { state = { ...state, secondaryStatus: 'loaded', secondaryCues: translations,
         secondaryLanguage: 'zh-Hans', secondaryMessage: '第二字幕已就绪：8 条' }; publish(); }, 120);
     } else if (message.type === 'refresh') {
+      metrics.refreshes++;
       state = { ...state, status: 'loading', message: '正在重新读取网站字幕…' }; publish();
-      setTimeout(() => { state = { ...state, status: 'loaded', message: '字幕与自然语段已就绪' }; publish(); }, 120);
+      setTimeout(() => { state = { ...bilibiliState, status: 'loaded', message: '字幕与自然语段已就绪' }; publish(); }, 120);
     }
   } };
   globalThis.chrome = {

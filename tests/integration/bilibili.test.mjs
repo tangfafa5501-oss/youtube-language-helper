@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 
 const code = await readFile(new URL('../../.output/chrome-mv3/content-scripts/bilibili.js', import.meta.url), 'utf8');
 const mainCode = await readFile(new URL('../../.output/chrome-mv3/content-scripts/bilibili-main.js', import.meta.url), 'utf8');
+const backgroundCode = await readFile(new URL('../../.output/chrome-mv3/background.js', import.meta.url), 'utf8');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const events = () => { const listeners = new Set(); return { addListener: fn => listeners.add(fn), emit: value => { for (const fn of listeners) fn(value); } }; };
 
@@ -13,7 +14,7 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
   metadataDelays = [], pageCid = '2', failPlayerCount = 0, aiOnly = false } = {}) {
   const timers = new Set(), connect = events(), document = new EventTarget();
   document.documentElement = { dataset: {} };
-  const requests = [];
+  const requests = [], backgroundRequests = [], pageRequests = [], headerRules = [];
   let remainingPlayerFailures = failPlayerCount;
   const video = Object.assign(new EventTarget(), { readyState: 4, duration: 300, currentTime: 0, paused: true, playbackRate: 1, seeking: false });
   video.play = async () => { video.paused = false; video.dispatchEvent(new Event('play')); video.dispatchEvent(new Event('playing')); };
@@ -68,15 +69,41 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
     ] });
     throw new Error(`unexpected URL ${value}`);
   };
-  const context = createContext({ console, URL, AbortController, CustomEvent, Event, EventTarget, document, location, fetch, Response, TextEncoder, TextDecoder, DataView,
+  // Execute the shipped worker in a separate world. Direct subtitle fetches in the
+  // page world deliberately fail, so success proves the runtime relay was used.
+  const workerListeners = new Set();
+  const worker = createContext({ console, URL, AbortController, AbortSignal, DOMException, Error, TypeError, TextEncoder, TextDecoder, setTimeout, clearTimeout,
+    chrome: { runtime: { id: 'test-extension', onMessage: { addListener: fn => workerListeners.add(fn) } },
+      declarativeNetRequest: { updateSessionRules: async rules => headerRules.push(structuredClone(rules)) },
+      sidePanel: { setPanelBehavior: async () => {} }, permissions: { contains: async () => true, remove: async () => true },
+      tabs: { get: async () => ({ url: location.href }), sendMessage: async () => {}, onRemoved: events(), onUpdated: events() },
+      webRequest: { onCompleted: events() },
+      storage: { local: { setAccessLevel: async () => {}, get: async () => ({}), set: async () => {}, remove: async () => {} },
+        session: { get: async () => ({}), set: async () => {} } },
+    }, fetch: async (url, options) => { backgroundRequests.push({ url: String(url), options }); return fetch(url); },
+  });
+  await runInContext(backgroundCode, worker);
+  const sendMessage = message => new Promise(resolve => {
+    const sender = { id: 'test-extension', frameId: 0, url: location.href, tab: { id: 1 } };
+    for (const listener of workerListeners) {
+      if (listener(message, sender, result => resolve(structuredClone(result))) === true) return;
+    }
+    resolve(undefined);
+  });
+  const pageFetch = async url => {
+    pageRequests.push(String(url));
+    if (/hdslb\.com\/.*\.json/.test(String(url))) throw new TypeError('Failed to fetch');
+    return fetch(url);
+  };
+  const context = createContext({ console, URL, AbortController, DOMException, CustomEvent, Event, EventTarget, document, location, fetch: pageFetch, Response, TextEncoder, TextDecoder, DataView,
     crypto: { randomUUID }, setTimeout, clearTimeout, queueMicrotask,
     setInterval: (...args) => { const timer = setInterval(...args); timers.add(timer); return timer; }, clearInterval,
-    chrome: { runtime: { id: 'test-extension', onConnect: connect, getURL: path => `chrome-extension://test-extension${path}` } },
+    chrome: { runtime: { id: 'test-extension', onConnect: connect, sendMessage, getURL: path => `chrome-extension://test-extension${path}` } },
   });
-  runInContext(`var window=globalThis; var messageListeners=new Set();
-    window.addEventListener=(type, fn)=>{ if(type==='message') messageListeners.add(fn); };
-    window.removeEventListener=(type, fn)=>{ if(type==='message') messageListeners.delete(fn); };
-    window.postMessage=data=>queueMicrotask(()=>{ for(const fn of messageListeners) fn({data,source:window,origin:location.origin}); });`, context);
+  runInContext(`var window=globalThis; var windowListeners=new Map();
+    window.addEventListener=(type, fn)=>{ if(!windowListeners.has(type)) windowListeners.set(type,new Set()); windowListeners.get(type).add(fn); };
+    window.removeEventListener=(type, fn)=>{ windowListeners.get(type)?.delete(fn); };
+    window.postMessage=data=>queueMicrotask(()=>{ for(const fn of windowListeners.get('message')??[]) fn({data,source:window,origin:location.origin}); });`, context);
   if (withMain) runInContext(mainCode, context);
   runInContext(code, context);
   const messages = [], onMessage = events(), onDisconnect = events();
@@ -91,7 +118,13 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
   const send = message => onMessage.emit({ version: 1, videoId: state().video.videoId, session: state().video.session,
     trackId: state().trackId, ...message });
   const sendRaw = message => onMessage.emit(message);
-  return { state, send, sendRaw, video, messages, requests, location, diagnostics: document.documentElement.dataset,
+  const key = (code, extra = {}) => {
+    const event = { code, isTrusted: true, defaultPrevented: false, stopped: false,
+      preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...extra };
+    for (const listener of context.windowListeners.get('keydown') ?? []) listener(event);
+    return event;
+  };
+  return { state, send, sendRaw, key, video, messages, requests, backgroundRequests, pageRequests, headerRules, location, diagnostics: document.documentElement.dataset,
     disconnect: port.disconnect };
 }
 
@@ -105,7 +138,36 @@ test('production Bilibili bridge automatically fetches an AI track when no manua
   assert.equal(h.state().cues[0].text, '这是 B站 AI 保底字幕。');
   assert.match(h.state().message, /B 站字幕已就绪/);
   assert.equal(h.requests.filter(url => url.includes('ai.json')).length, 1);
+  assert.equal(h.backgroundRequests.filter(request => request.url.includes('ai.json')).length, 1);
+  assert.equal(h.pageRequests.some(url => url.includes('ai.json')), false);
+  assert.equal(h.headerRules.length, 1);
   assert.equal(h.messages.some(message => message.source === 'bilibili-ocr' || message.ocr), false);
+});
+
+test('Bilibili page keyboard forwards A/S/D/E with the current binding and consumes each event once', async t => {
+  const h = await harness(t, { withMain: true, aiOnly: true });
+  for (const [code, action] of [['KeyA', 'previous'], ['KeyS', 'replay'], ['KeyD', 'next'], ['KeyE', 'shadowing']]) {
+    const before = h.messages.length;
+    const event = h.key(code);
+    assert.equal(event.defaultPrevented, true); assert.equal(event.stopped, true);
+    assert.deepEqual(h.messages.slice(before), [{ type: 'bilibili-shortcut', action,
+      videoId: h.state().video.videoId, session: h.state().video.session, trackId: h.state().trackId }]);
+  }
+  const before = h.messages.length;
+  for (const extra of [{ isTrusted: false }, { ctrlKey: true }, { repeat: true }, { isComposing: true },
+    { target: { closest: selector => selector.includes('textarea') ? {} : null } }]) {
+    assert.equal(h.key('KeyE', extra).defaultPrevented, false);
+  }
+  assert.equal(h.messages.length, before);
+  h.disconnect();
+  assert.equal(h.key('KeyE').defaultPrevented, false);
+});
+
+test('Bilibili page keyboard ignores stale video bindings during SPA navigation', async t => {
+  const h = await harness(t, { aiOnly: true });
+  h.location.href = 'https://www.bilibili.com/video/BV1GJ411x7h7/?p=2';
+  assert.equal(h.key('KeyD').defaultPrevented, false);
+  assert.equal(h.messages.some(message => message.type === 'bilibili-shortcut'), false);
 });
 
 test('production Bilibili page bridge keeps website primary and secondary tracks independent', async t => {

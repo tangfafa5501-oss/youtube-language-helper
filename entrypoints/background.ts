@@ -1,10 +1,12 @@
 import { record, watchVideoId } from '../lib/captions';
+import { registerBilibiliNetwork } from '../lib/bilibili-background';
 import { SERVICE_CHANNEL, trustedServiceSender, type PublicSettings, type ServiceReply } from '../lib/settings';
 import { YOUTUBE_NATIVE_CACHE_KEY, YOUTUBE_NATIVE_CHANNEL, applyNativeAuth, boundedNativeCache, chooseNativeTranscript,
   observedTimedText, timedTextFormat, validNativeTranscript, type NativeAuth, type NativeTrackKind,
   type NativeTranscript } from '../lib/youtube-native';
 
 export default defineBackground(() => {
+  registerBilibiliNetwork();
   // Fail closed: do not save/read a secret unless content-script access is off.
   const protectedStorage = browser.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).then(() => true, () => false);
   const settingsKey = 'settings-v2';

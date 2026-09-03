@@ -28,6 +28,8 @@ test('Bilibili page-bridge tracks only accept official HTTPS subtitle hosts', ()
   assert.equal(isBiliTrack(valid), true);
   assert.equal(isBiliTrack({ ...valid, url: 'http://i0.hdslb.com/subtitle.json' }), false);
   assert.equal(isBiliTrack({ ...valid, url: 'https://example.com/subtitle.json' }), false);
+  assert.equal(isBiliTrack({ ...valid, url: 'https://user:password@i0.hdslb.com/subtitle.json' }), false);
+  assert.equal(isBiliTrack({ ...valid, url: 'https://i0.hdslb.com:8000/subtitle.json' }), false);
   assert.equal(isBiliTrack({ ...valid, id: '' }), false);
   assert.equal(isBiliTrack({ ...valid, secondary: { id: 'x', name: '中文', language: 'zh-CN', url: 'https://evil.example/subtitle.json' } }), false);
   assert.equal(isBiliTrack({ ...valid, secondary: { id: valid.id, name: '中文', language: 'zh-CN', url: 'https://i0.hdslb.com/zh.json' } }), false);

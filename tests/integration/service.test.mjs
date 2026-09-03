@@ -4,12 +4,16 @@ import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
 const code = await readFile(new URL('../../.output/chrome-mv3/background.js', import.meta.url), 'utf8');
 const events = () => { const listeners = new Set(); return { addListener: fn => listeners.add(fn), emit: (...args) => { for (const fn of listeners) fn(...args); } }; };
-async function harness(restrict = true, response = () => Response.json({})) {
+async function harness(restrict = true, response = () => Response.json({}), { denyHeaderRules = false } = {}) {
   const listeners = new Set(); let data = {}, sessionData = {}, access;
-  const requests = [], removed = events(), updated = events(), completed = events(), sentToTabs = []; let permissionRemoved = 0;
+  const requests = [], headerRules = [], removed = events(), updated = events(), completed = events(), sentToTabs = []; let permissionRemoved = 0, requestSequence = 0;
   let currentTabUrl = 'https://www.youtube.com/watch?v=X627czLUsGY&t=100';
-  const context = createContext({ console, URL, AbortController, AbortSignal, DOMException, TextDecoder, setTimeout, clearTimeout,
+  const context = createContext({ console, URL, AbortController, AbortSignal, DOMException, Error, TypeError, TextEncoder, TextDecoder, setTimeout, clearTimeout,
     chrome: { runtime: { id: 'own', onMessage: { addListener: fn => listeners.add(fn) } },
+      declarativeNetRequest: { updateSessionRules: async value => {
+        if (denyHeaderRules) throw Error('header permission unavailable');
+        headerRules.push(structuredClone(value));
+      } },
       sidePanel: { setPanelBehavior: async () => {} },
       permissions: { contains: async () => true, remove: async () => { permissionRemoved++; return true; } },
       tabs: { get: async () => ({ url: currentTabUrl }),
@@ -41,11 +45,96 @@ async function harness(restrict = true, response = () => Response.json({})) {
   const sendNativeLatest = () => dispatch(
     { channel: 'ylh-youtube-native-v1', version: 1, type: 'latest', videoId: 'X627czLUsGY' },
     { id: 'own', frameId: 0, url: 'https://www.youtube.com/watch?v=X627czLUsGY', tab: { id: 1 } });
-  return { send, sendNative, sendNativeLatest, requests, removed, updated, completed, sentToTabs, setStored: value => { data = value; },
+  const sendBili = (payload = {}, sender = {}) => dispatch(
+    { channel: 'ylh-bilibili-network-v1', version: 1, type: 'cues', requestId: `bili-${++requestSequence}`,
+      bvid: 'BV1GJ411x7h7', page: 1,
+      track: { id: 'bili:9', name: '中文 (AI)', language: 'ai-zh', kind: 'asr', url: 'https://i0.hdslb.com/ai.json' }, ...payload },
+    { id: 'own', frameId: 0, url: 'https://www.bilibili.com/video/BV1GJ411x7h7/', tab: { id: 1 }, ...sender });
+  return { send, sendNative, sendNativeLatest, sendBili, requests, headerRules, removed, updated, completed, sentToTabs, setStored: value => { data = value; },
     setCurrentTabUrl: value => { currentTabUrl = value; },
     localStored: () => structuredClone(data),
     sessionStored: () => structuredClone(sessionData), get permissionRemoved() { return permissionRemoved; } };
 }
+
+test('production Bilibili relay sets a scoped Referer rule before fetching and preserves raw cue timing', async () => {
+  const body = [{ from: 1.234, to: 4.567, content: '这是 AI 保底字幕。' }];
+  const h = await harness(true, (_url, options) => {
+    assert.equal(h.headerRules.length, 1);
+    assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'error');
+    return Response.json({ body });
+  });
+  h.setCurrentTabUrl('https://www.bilibili.com/video/BV1GJ411x7h7/');
+  const result = await h.sendBili();
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.result[0].text, body[0].content);
+  assert.deepEqual([result.result[0].startMs, result.result[0].endMs], [1234, 4567]);
+  assert.equal(h.requests.length, 1);
+  const rule = h.headerRules[0].addRules[0];
+  assert.deepEqual(rule.action.requestHeaders, [{ header: 'Referer', operation: 'set', value: 'https://bilibili.com' }]);
+  assert.deepEqual(rule.condition.initiatorDomains, ['own']);
+  assert.deepEqual(rule.condition.requestMethods, ['get']);
+  const matches = new RegExp(rule.condition.regexFilter);
+  assert.equal(matches.test('https://api.bilibili.com/x/player/wbi/v2'), true);
+  assert.equal(matches.test('https://aisubtitle.hdslb.com/a.json'), true);
+  assert.equal(matches.test('https://www.youtube.com/api/timedtext'), false);
+  assert.equal(matches.test('https://bilibili.com.evil.example/a.json'), false);
+});
+
+test('Bilibili relay rejects untrusted senders, external URLs and stale routes without network access', async () => {
+  const h = await harness(); h.setCurrentTabUrl('https://www.bilibili.com/video/BV1GJ411x7h7/');
+  for (const sender of [{ id: 'other' }, { frameId: 1 }, { url: 'https://www.youtube.com/watch?v=X627czLUsGY' }, { tab: {} }]) {
+    assert.equal((await h.sendBili({}, sender)).ok, false);
+  }
+  for (const url of ['https://evil.example/a.json', 'http://i0.hdslb.com/a.json',
+    'https://user:password@i0.hdslb.com/a.json', 'https://i0.hdslb.com:8000/a.json']) {
+    assert.equal((await h.sendBili({ track: { id: 'a', kind: 'asr', language: 'zh', name: 'AI', url } })).ok, false);
+  }
+  assert.equal((await h.sendBili({ page: 2 })).ok, false);
+  assert.equal((await h.sendBili({ type: 'arbitrary-fetch', url: 'https://evil.example/' })).ok, false);
+  assert.equal(h.requests.length, 0); assert.equal(h.headerRules.length, 0);
+});
+
+test('Bilibili network failure settles and a subsequent retry succeeds instead of leaving a zombie job', async () => {
+  let fail = true;
+  const h = await harness(true, () => {
+    if (fail) throw new TypeError('Failed to fetch');
+    return Response.json({ body: [{ from: 1, to: 2, content: '恢复成功' }] });
+  });
+  h.setCurrentTabUrl('https://www.bilibili.com/video/BV1GJ411x7h7/');
+  const failed = await h.sendBili({ requestId: 'retry-id' });
+  assert.equal(failed.ok, false); assert.match(failed.error, /B站后台网络请求失败/);
+  fail = false;
+  const retried = await h.sendBili({ requestId: 'retry-id' });
+  assert.equal(retried.ok, true, retried.error); assert.equal(retried.result[0].text, '恢复成功');
+  assert.equal(h.headerRules.length, 1);
+});
+
+test('Bilibili relay rejects a response after navigation and cancels in-flight requests', async () => {
+  let finish;
+  const h = await harness(true, (_url, options) => new Promise((resolve, reject) => {
+    finish = () => resolve(Response.json({ body: [{ from: 1, to: 2, content: '旧视频' }] }));
+    options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+  }));
+  h.setCurrentTabUrl('https://www.bilibili.com/video/BV1GJ411x7h7/');
+  const pending = h.sendBili();
+  while (!finish) await new Promise(resolve => setImmediate(resolve));
+  h.setCurrentTabUrl('https://www.bilibili.com/video/BV1GJ411x7h7/?p=2'); finish();
+  assert.match((await pending).error, /视频已切换/);
+  h.setCurrentTabUrl('https://www.bilibili.com/video/BV1GJ411x7h7/'); finish = undefined;
+  const cancelled = h.sendBili({ requestId: 'cancel-me' });
+  while (!finish) await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await h.sendBili({ type: 'cancel', requestId: 'cancel-me' })).ok, true);
+  assert.match((await cancelled).error, /已取消/);
+});
+
+test('Bilibili relay does not fetch when Referer setup fails, and YouTube never installs a Bilibili rule', async () => {
+  const blocked = await harness(true, () => Response.json({}), { denyHeaderRules: true });
+  blocked.setCurrentTabUrl('https://www.bilibili.com/video/BV1GJ411x7h7/');
+  assert.match((await blocked.sendBili()).error, /请求头规则不可用/);
+  assert.equal(blocked.requests.length, 0);
+  const youtube = await harness(); await youtube.sendNativeLatest();
+  assert.equal(youtube.headerRules.length, 0);
+});
 test('production background persists only local display and language preferences without a network request', async () => {
   const h = await harness();
   assert.deepEqual((await h.send('settings')).settings,
