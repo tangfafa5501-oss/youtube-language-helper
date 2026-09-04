@@ -1,0 +1,5 @@
+Pitchfinder 2.3.4: https://github.com/peterkhayes/pitchfinder
+The included YIN detector is derived from aubio.
+Copyright (C) 2003-2009 Paul Brossier <piem@aubio.org>
+Distributed under GNU GPL version 3 or (at your option) any later version,
+without warranty. See pitchfinder-gpl-3.0.txt for the complete license.

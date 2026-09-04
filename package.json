@@ -10,6 +10,8 @@
   "scripts": {
     "dev": "wxt",
     "build": "wxt build",
+    "doctor": "node scripts/doctor.js",
+    "verify": "npm run build && node scripts/verify-extension.js",
     "zip": "wxt zip",
     "typecheck": "wxt prepare && tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
@@ -23,15 +25,20 @@
     "@radix-ui/react-popover": "1.1.23",
     "@radix-ui/react-select": "2.3.7",
     "@radix-ui/react-slider": "1.4.7",
-    "lucide-react": "0.479.0",
+    "dexie": "4.4.5",
+    "diff": "9.0.0",
+    "pitchfinder": "2.3.4",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "recharts": "3.10.1",
+    "recorder-core": "1.3.26070800",
     "sbd": "1.0.19"
   },
   "devDependencies": {
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
     "@wxt-dev/module-react": "1.2.2",
+    "playwright": "1.62.1",
     "typescript": "5.9.3",
     "wxt": "0.21.4"
   }

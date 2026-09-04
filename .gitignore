@@ -6,6 +6,10 @@ dist/
 coverage/
 test-results/
 playwright-report/
+artifacts/doctor/
+artifacts/doctor.lock
+artifacts/verification_latest.png
+artifacts/verification_latest.json
 
 # Private configuration and captured user data
 .env

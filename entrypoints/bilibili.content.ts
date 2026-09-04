@@ -1,3 +1,5 @@
+import { handlePracticeMessage } from '../lib/practice-bridge';
+import { segmentFromRows } from '../lib/practice';
 import { biliPhrases, biliVideo, chooseBiliPair, isBiliTrack, type BiliTrack } from '../lib/bilibili';
 import { requestBilibili, type BiliMetadataTracks } from '../lib/bilibili-network';
 import { shortcutAction } from '../lib/shortcuts';
@@ -59,9 +61,8 @@ export default defineContentScript({
               segmentEndMs: machine.segment.endMs,
               ...(machine.mode === 'manual'
                 ? { manualStartMs: machine.segment.startMs, manualEndMs: machine.segment.endMs }
-                : { shadowingStartMs: machine.segment.startMs, shadowingEndMs: machine.segment.endMs }),
-              ...(machine.mode === 'shadowing' && machine.phase === 'waiting'
-                ? { shadowingWaitMs: machine.waitDurationMs, shadowingResumeAtMs: machine.resumeAtMs } : {}),
+                : machine.mode === 'shadowing' ? { shadowingStartMs: machine.segment.startMs, shadowingEndMs: machine.segment.endMs }
+                  : { practiceStartMs: machine.segment.startMs, practiceEndMs: machine.segment.endMs }),
             } : {}) };
       for (const port of clients) try { port.postMessage(message); } catch { clients.delete(port); }
     };
@@ -82,19 +83,6 @@ export default defineContentScript({
         root.dataset.ylhBrakePausedMs = report.pausedMs.toFixed(3);
         root.dataset.ylhBrakeActualMs = report.actualMs.toFixed(3);
         root.dataset.ylhBrakeDriftMs = report.driftMs.toFixed(3);
-      },
-      onShadowingCycle: (owner, report) => {
-        const root = document.documentElement;
-        if (root) {
-          root.dataset.ylhShadowingExpectedWaitMs = report.expectedWaitMs.toFixed(3);
-          root.dataset.ylhShadowingActualWaitMs = report.actualWaitMs.toFixed(3);
-          root.dataset.ylhShadowingWaitErrorMs = report.waitErrorMs.toFixed(3);
-          root.dataset.ylhShadowingBoundaryErrorMs = report.boundaryErrorMs.toFixed(3);
-        }
-        if (clients.has(owner)) try {
-          owner.postMessage({ type: 'shadowing-cycle', videoId: state.video?.videoId, session: state.video?.session,
-            trackId: state.trackId, ...report });
-        } catch { /* disconnected */ }
       },
     });
     const reset = (message = '正在读取 B 站视频…') => {
@@ -177,7 +165,9 @@ export default defineContentScript({
         || message.videoId !== info.videoId || message.session !== info.session || message.trackId !== state.trackId) return;
       const phrase = typeof message.phraseId === 'string' ? state.phrases?.find(item => item.id === message.phraseId) : undefined;
       const cue = typeof message.cueId === 'string' ? state.cues.find(item => item.cueId === message.cueId) : undefined;
-      const startMs = phrase?.startMs ?? cue?.startMs, endMs = phrase?.endMs ?? cue?.endMs;
+      const range = message.endPhraseId ? segmentFromRows(state.phrases ?? [], message.phraseId, message.endPhraseId) : null;
+      if (message.endPhraseId && !range) return;
+      const startMs = phrase?.startMs ?? cue?.startMs, endMs = range?.endMs ?? phrase?.endMs ?? cue?.endMs;
       const video = videoElement();
       if (startMs === null || startMs === undefined || !video || video.readyState === 0 || !Number.isFinite(video.duration)) return;
       if (startMs / 1000 >= video.duration) {
@@ -186,9 +176,8 @@ export default defineContentScript({
         return;
       }
       const navigation = message.intent === 'previous' || message.intent === 'next' || message.intent === 'replay';
-      const mode: PlayMode = navigation ? 'manual'
-        : message.playMode === 'shadowing' ? 'shadowing'
-          : message.playMode === 'manual' ? 'manual' : 'auto';
+      const mode: PlayMode = message.playMode === 'shadowing' || message.playMode === 'practice' ? message.playMode
+        : navigation || message.playMode === 'manual' ? 'manual' : 'auto';
       const boundedEnd = typeof endMs === 'number' ? Math.min(endMs, video.duration * 1000) : endMs;
       if (typeof boundedEnd !== 'number' || boundedEnd <= startMs) return;
       const rows = phrase ? state.phrases ?? [] : state.cues;
@@ -214,8 +203,9 @@ export default defineContentScript({
         if (message.type === 'playback-toggle') {
           await playback.toggle(port);
         }
+        if (message.type === 'practice-toggle') await playback.togglePractice(port);
         if (message.type === 'playback-rate' && isPlaybackRate(message.rate)) video.playbackRate = message.rate;
-        if (message.type === 'playback-mode' && (message.mode === 'auto' || message.mode === 'manual' || message.mode === 'shadowing')) {
+        if (message.type === 'playback-mode' && (message.mode === 'auto' || message.mode === 'manual' || message.mode === 'shadowing' || message.mode === 'practice')) {
           if (message.mode === 'auto') await playback.setMode('auto', port);
           else {
             const rows = state.phrases ?? [];
@@ -236,8 +226,11 @@ export default defineContentScript({
     ctx.addEventListener(window, 'keydown', event => {
       const current = biliVideo(location.href), binding = state.video;
       if (!event.isTrusted || state.status !== 'loaded' || !binding || !current || `${current.bvid}:p${current.page}` !== settledKey) return;
-      const action = shortcutAction(event), owner = [...clients].at(-1);
+      const action = shortcutAction(event, true), owner = [...clients].at(-1);
       if (!action || !owner) return;
+      if (['record', 'dictation', 'pitch', 'play-recording', 'cancel-recording', 'dictation-focus',
+        'expand-start', 'expand-end', 'contract-start', 'contract-end'].includes(action) && playback.mode !== 'practice') return;
+      if (event.repeat) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       // One key goes to one panel, then reuses its existing seek/playback state machine.
       try { owner.postMessage({ type: 'bilibili-shortcut', action, videoId: binding.videoId,
         session: binding.session, trackId: state.trackId }); } catch { clients.delete(owner); return; }
@@ -248,6 +241,8 @@ export default defineContentScript({
       clients.add(port); port.postMessage(state); void refresh();
       port.onMessage.addListener(message => {
         if (!record(message) || message.version !== 1) return;
+        const practiceSession = state.video?.session;
+        if (handlePracticeMessage(message, port, state, playback, () => clients.has(port) && state.video?.session === practiceSession && (() => { const route = biliVideo(location.href); return !!route && `${route.bvid}:p${route.page}` === settledKey; })())) return;
         if (message.type === 'refresh') { settledKey = ''; void refresh(true); return; }
         if (message.type === 'seek') void seek(message, port);
         if (message.type === 'bilibili-select' && typeof message.trackId === 'string' && message.session === state.video?.session) {
@@ -256,7 +251,7 @@ export default defineContentScript({
             ? urls.get(message.secondaryTrackId) : undefined;
           if (primary) void loadTracks(primary, secondary, state.video!.session);
         }
-        if (message.type === 'playback-toggle' || message.type === 'playback-rate' || message.type === 'playback-mode') void control(message, port);
+        if (message.type === 'practice-toggle' || message.type === 'playback-toggle' || message.type === 'playback-rate' || message.type === 'playback-mode') void control(message, port);
       });
       port.onDisconnect.addListener(() => { clients.delete(port); if (playback.owns(port)) playback.clear('auto'); });
     });

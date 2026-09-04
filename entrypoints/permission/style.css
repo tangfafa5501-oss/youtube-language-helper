@@ -1,0 +1,1 @@
+body { margin: 0; background: #fff8eb; color: #352719; font: 16px/1.6 system-ui, sans-serif; } main { padding: 28px; } h1 { font-size: 23px; } button { border: 0; border-radius: 12px; background: #d98212; color: white; padding: 13px 20px; font: inherit; cursor: pointer; } button:disabled { opacity: .6; }

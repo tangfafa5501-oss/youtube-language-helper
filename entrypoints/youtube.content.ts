@@ -1,7 +1,10 @@
+import { handlePracticeMessage } from '../lib/practice-bridge';
+import { segmentFromRows } from '../lib/practice';
 import { parseJson3, record, watchVideoId } from '../lib/captions';
 import { PrecisePlaybackController, type PlaybackBoundary } from '../lib/playback-machine';
 import { CHANNEL, PORT, emptyState, isPlaybackRate, isVideoInfo, type PlayMode, type State } from '../lib/protocol';
 import { SessionGate } from '../lib/session';
+import { shortcutAction } from '../lib/shortcuts';
 import { YOUTUBE_NATIVE_CHANNEL, nativeDisplayPhrases, normalizeNativeLanguage, validNativeTranscript, type NativeTrackKind,
   type NativeTranscript } from '../lib/youtube-native';
 
@@ -12,6 +15,7 @@ export default defineContentScript({
   main(ctx) {
     const clients = new Set<Browser.runtime.Port>();
     const gate = new SessionGate();
+    let seekGeneration = 0;
     let state: State = emptyState();
     let infoBusy = false;
     let secondaryGeneration = 0;
@@ -52,9 +56,8 @@ export default defineContentScript({
               segmentEndMs: machine.segment.endMs,
               ...(machine.mode === 'manual'
                 ? { manualStartMs: machine.segment.startMs, manualEndMs: machine.segment.endMs }
-                : { shadowingStartMs: machine.segment.startMs, shadowingEndMs: machine.segment.endMs }),
-              ...(machine.mode === 'shadowing' && machine.phase === 'waiting'
-                ? { shadowingWaitMs: machine.waitDurationMs, shadowingResumeAtMs: machine.resumeAtMs } : {}),
+                : machine.mode === 'shadowing' ? { shadowingStartMs: machine.segment.startMs, shadowingEndMs: machine.segment.endMs }
+                  : { practiceStartMs: machine.segment.startMs, practiceEndMs: machine.segment.endMs }),
             } : {}),
       };
       for (const port of clients) {
@@ -107,19 +110,6 @@ export default defineContentScript({
         root.dataset.ylhBrakePausedMs = report.pausedMs.toFixed(3);
         root.dataset.ylhBrakeActualMs = report.actualMs.toFixed(3);
         root.dataset.ylhBrakeDriftMs = report.driftMs.toFixed(3);
-      },
-      onShadowingCycle: (owner, report) => {
-        const root = document.documentElement;
-        if (root) {
-          root.dataset.ylhShadowingExpectedWaitMs = report.expectedWaitMs.toFixed(3);
-          root.dataset.ylhShadowingActualWaitMs = report.actualWaitMs.toFixed(3);
-          root.dataset.ylhShadowingWaitErrorMs = report.waitErrorMs.toFixed(3);
-          root.dataset.ylhShadowingBoundaryErrorMs = report.boundaryErrorMs.toFixed(3);
-        }
-        if (clients.has(owner)) try {
-          owner.postMessage({ type: 'shadowing-cycle', videoId: state.video?.videoId, session: state.video?.session,
-            trackId: state.trackId, ...report });
-        } catch { /* disconnected */ }
       },
     });
     function reset(message = '正在读取当前视频…') {
@@ -356,12 +346,15 @@ export default defineContentScript({
       const cue = state.cues.find(c => c.cueId === message.cueId);
       const phrase = typeof message.phraseId === 'string' ? state.phrases?.find(item => item.id === message.phraseId) : undefined;
       const targetMs = phrase?.startMs ?? cue?.startMs;
-      const endMs = phrase?.endMs ?? cue?.endMs;
+      const range = message.endPhraseId ? segmentFromRows(state.phrases ?? [], message.phraseId, message.endPhraseId) : null;
+      if (message.endPhraseId && !range) return;
+      const endMs = range?.endMs ?? phrase?.endMs ?? cue?.endMs;
       if (targetMs === undefined || targetMs === null) return;
       const token = gate.next();
+      const seekToken = ++seekGeneration;
       // A different panel can keep this video session alive after the requester
       // disconnects. Session validity alone does not authorize its pending seek.
-      const current = () => gate.current(token) && clients.has(port);
+      const current = () => gate.current(token) && seekToken === seekGeneration && clients.has(port);
       const report = (message: string) => {
         if (!current()) return;
         try { port.postMessage({ type: 'playback', message, videoId: v.videoId, session: v.session, trackId: state.trackId }); }
@@ -375,9 +368,8 @@ export default defineContentScript({
         if (!video || video.readyState === 0 || !Number.isFinite(video.duration)) throw new Error('播放器尚未准备好定位');
         if (targetMs / 1000 >= video.duration) throw new Error('条目时间超出当前视频，未执行定位');
         const navigation = message.intent === 'previous' || message.intent === 'next' || message.intent === 'replay';
-        const mode: PlayMode = navigation ? 'manual'
-          : message.playMode === 'shadowing' ? 'shadowing'
-            : message.playMode === 'manual' ? 'manual' : 'auto';
+        const mode: PlayMode = message.playMode === 'shadowing' || message.playMode === 'practice' ? message.playMode
+          : navigation || message.playMode === 'manual' ? 'manual' : 'auto';
         const boundedEnd = typeof endMs === 'number' ? Math.min(endMs, video.duration * 1000) : endMs;
         if (typeof boundedEnd !== 'number' || boundedEnd <= targetMs) throw new Error('播放语句结束时间无效');
         const rows = phrase ? state.phrases ?? [] : state.cues;
@@ -398,10 +390,14 @@ export default defineContentScript({
       if (!video || video.readyState === 0) return;
       try {
         if (message.type === 'playback-toggle') {
+          // A queued info reply must not restore shadowing after a newer play.
+          seekGeneration++;
           await playback.toggle(port);
         }
+        if (message.type === 'practice-toggle') await playback.togglePractice(port);
         if (message.type === 'playback-rate' && isPlaybackRate(message.rate)) video.playbackRate = message.rate;
-        if (message.type === 'playback-mode' && (message.mode === 'auto' || message.mode === 'manual' || message.mode === 'shadowing')) {
+        if (message.type === 'playback-mode' && (message.mode === 'auto' || message.mode === 'manual' || message.mode === 'shadowing' || message.mode === 'practice')) {
+          seekGeneration++;
           if (message.mode === 'auto') await playback.setMode('auto', port);
           else {
             const rows = state.phrases ?? [];
@@ -422,11 +418,39 @@ export default defineContentScript({
           videoId: v.videoId, session: v.session, trackId: state.trackId }); } catch { /* disconnected */ }
       }
     }
+    let ownsSpacePress = false;
+    ctx.addEventListener(window, 'keydown', event => {
+      if (event.isTrusted && event.code === 'Space' && ownsSpacePress) {
+        event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
+      const binding = state.video, owner = [...clients].at(-1), action = shortcutAction(event, true);
+      if (!event.isTrusted || !action || state.status !== 'loaded' || !binding || !owner
+        || watchVideoId(location.href) !== binding.videoId || !videoElement()?.readyState) return;
+      if (['record', 'dictation', 'pitch', 'play-recording', 'cancel-recording', 'dictation-focus',
+        'expand-start', 'expand-end', 'contract-start', 'contract-end'].includes(action) && playback.mode !== 'practice') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (event.code === 'Space') ownsSpacePress = true;
+      if (event.repeat) return;
+      if (action === 'play') void playbackControl({ type: 'playback-toggle', videoId: binding.videoId,
+        session: binding.session, trackId: state.trackId }, owner);
+      else try { owner.postMessage({ type: 'player-shortcut', action, videoId: binding.videoId,
+        session: binding.session, trackId: state.trackId }); } catch { clients.delete(owner); }
+    }, { capture: true });
+    // YouTube can also toggle on release. Own the whole consumed Space gesture,
+    // even if focus/modifiers change while held; never send a second play command.
+    for (const type of ['keypress', 'keyup'] as const) ctx.addEventListener(window, type, event => {
+      if (!event.isTrusted || event.code !== 'Space' || !ownsSpacePress) return;
+      if (type === 'keyup') ownsSpacePress = false;
+      event.preventDefault(); event.stopImmediatePropagation();
+    }, { capture: true });
+    ctx.addEventListener(window, 'blur', () => { ownsSpacePress = false; });
     browser.runtime.onConnect.addListener(port => {
       if (port.name !== PORT || port.sender?.id !== browser.runtime.id || port.sender?.url !== browser.runtime.getURL('/sidepanel.html')) return;
       clients.add(port); port.postMessage(state); void refresh();
       port.onMessage.addListener(m => {
         if (!record(m) || m.version !== 1) return;
+        const practiceSession = state.video?.session;
+        if (handlePracticeMessage(m, port, state, playback, () => clients.has(port) && state.video?.session === practiceSession && watchVideoId(location.href) === state.video?.videoId)) return;
         if (m.type === 'refresh') { reset(); void refresh(); }
         if (m.type === 'secondary-clear' && state.video && m.session === state.video.session && m.videoId === state.video.videoId) {
           secondaryGeneration++; state = { ...state, secondaryTrackId: null, secondaryCues: [], secondaryLanguage: undefined,
@@ -443,7 +467,7 @@ export default defineContentScript({
         }
         if (m.type === 'load-secondary' && typeof m.trackId === 'string' && m.session === state.video?.session) void load(m.trackId, 'secondary', m.force === true);
         if (m.type === 'seek') void seek(m, port);
-        if (m.type === 'playback-toggle' || m.type === 'playback-rate' || m.type === 'playback-mode') void playbackControl(m, port);
+        if (m.type === 'practice-toggle' || m.type === 'playback-toggle' || m.type === 'playback-rate' || m.type === 'playback-mode') void playbackControl(m, port);
       });
       port.onDisconnect.addListener(() => {
         clients.delete(port);

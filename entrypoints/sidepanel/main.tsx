@@ -1,12 +1,12 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Popover from '@radix-ui/react-popover';
 import * as Select from '@radix-ui/react-select';
 import * as Slider from '@radix-ui/react-slider';
-import { ArrowLeft, BookOpen, Check, ChevronDown, CircleHelp, Keyboard, Languages, Mic, MoreVertical,
-  Pause, Play, RefreshCw, Settings, SkipBack, SkipForward, X } from 'lucide-react';
+import { BookOpen, Check, ChevronDown, CircleHelp, Keyboard, Languages, Mic, MoreVertical,
+  ArrowUp, ArrowDown, Minus, Plus, Pause, Play, RefreshCw, Settings, SkipBack, SkipForward, X } from '../../components/icons';
 import { SettingsView } from '../../components/settings-view';
 import { adjacentPlaybackRate, PLAYBACK_RATES, PORT, emptyState, type PlayMode, type State, type Track } from '../../lib/protocol';
 import { connectPanel } from '../../lib/panel-connection';
@@ -17,7 +17,11 @@ import { activeTimedRowIndex, adjacentPlayableRowIndex, matchesPlaybackBinding }
 import { secondaryTextForRange } from '../../lib/subtitle-lanes';
 import { applyTheme } from '../../lib/theme';
 import { isShortcutAction, shortcutAction, type ShortcutAction } from '../../lib/shortcuts';
+import { createPracticeClient } from '../../lib/practice-client';
+import { livePracticeKey, type PracticeSegment } from '../../lib/practice';
+import type { ExerciseHandle } from '../../components/shadowing-exercise-card';
 import './style.css';
+const ShadowingExerciseCard = lazy(() => import('../../components/shadowing-exercise-card'));
 
 const defaultSettings: PublicSettings = { language: 'en', theme: 'system', displayMode: 'phrases' };
 
@@ -49,24 +53,24 @@ type EchoRow = { id: string; text: string; secondaryText: string; startMs: numbe
 
 const SHORTCUT_SECTIONS = [
   { title: '通用控制', items: [
-    ['?', '显示键盘快捷键'], ['Space / K', '播放/暂停'], ['Shift + < / >', '减速/加速'],
+    ['?', '显示键盘快捷键'], ['Space', '暂停/继续（继续时自动播放）'], ['Shift + < / >', '减速/加速'],
     ['E', '切换逐句跟读'], ['A', '上一句'], ['S', '重播当前句'], ['D', '下一句'],
   ] },
-  { title: '跟读模式控制（预留）', items: [
-    ['R', '开始/停止录音'], ['G', '播放录音'], ['V', '评估录音'], ['Esc', '取消录音'],
+  { title: '跟读模式控制', items: [
+    ['R', '开始/停止录音'], ['G', '播放录音'], ['Esc', '取消录音'],
     ['P', '切换音高曲线'], ['[ / ]', '扩展片段'], ['Shift + [ / ]', '收缩片段'],
   ] },
-  { title: '听写模式控制（预留）', items: [
-    ['/', '聚焦听写输入框'], ['Enter', '检查答案'], ['Shift + Enter', '换行'], ['Esc', '取消输入'],
+  { title: '听写模式控制', items: [
+    ['H', '切换听写模式'], ['/', '聚焦听写输入框'], ['Enter', '检查答案'], ['Shift + Enter', '换行'], ['Esc', '取消输入'],
   ] },
 ] as const;
 
 const GUIDE_STEPS = [
   ['选择字幕', '顶部左侧分别选择主字幕和第二字幕。第二字幕只读取视频实际提供的轨道，不自动翻译。'],
   ['选择语段', '点击任一语段即可定位。A、S、D 分别对应上一句、重播和下一句。'],
-  ['逐句跟读', '按 E 或底部【逐句跟读】开启。每句结束后会留出与刚播放语句等长的练习时间，然后自动播放下一句。'],
+  ['逐句跟读', '按 E 或逐句跟读按钮开启。每句播完停顿本句同等时长，再自动播放下一句，循环往下；按播放或空格恢复普通连续播放。'],
   ['播放速度', '点击底部倍速按钮打开滑块；Shift 加逗号或句号也可减速、加速。'],
-  ['后续功能', '书本按钮预留听写；麦克风按钮预留录音和评分。当前点击会明确提示尚未开放。'],
+  ['录音与听写', '点击右侧麦克风单独开启跟读模式，再按 R 录音、H 听写。此模式与逐句跟读的等时停顿独立；展开音高曲线时采集原声，停止录音后可比较语调并回放历史。'],
 ] as const;
 
 function TrackSelect({ label, value, disabled, placeholder, tracks, isBilibili, onChange }: { label: string; value: string;
@@ -83,15 +87,17 @@ function TrackSelect({ label, value, disabled, placeholder, tracks, isBilibili, 
   </Select.Root>;
 }
 
-const EchoCueRow = React.memo(function EchoCueRow({ item, active, index, onActivate }: { item: EchoRow; active: boolean; index: number; onActivate: (index: number) => void }) {
+const EchoCueRow = React.memo(function EchoCueRow({ item, active, index, onActivate, hidden, children }: { item: EchoRow; active: boolean; index: number; onActivate: (index: number) => void; hidden: boolean; children?: React.ReactNode }) {
+  const [revealed, setRevealed] = useState(false);
+  const obscure = hidden && !revealed;
   const playable = item.startMs !== null && item.endMs !== null && item.endMs > item.startMs;
   return <li><button data-phrase-id={item.id} data-row-index={index} className={`echo-cue ${active ? 'selected' : ''}`}
     title={`${timestamp(item.startMs)} → ${timestamp(item.endMs)}`} disabled={!playable} aria-current={active ? 'true' : undefined}
     onClick={() => onActivate(index)}>
     <span className="echo-time">{compactTimestamp(item.startMs)}</span>
-    <span className="echo-text">{item.text || '（空文本条目）'}</span>
-    {item.secondaryText ? <span className="echo-secondary-text">{item.secondaryText}</span> : null}
-  </button></li>;
+    <span className={`echo-text ${obscure ? 'dictation-hidden' : ''}`} aria-hidden={obscure}>{item.text || '（空文本条目）'}</span>
+    {item.secondaryText ? <span className={`echo-secondary-text ${obscure ? 'dictation-hidden' : ''}`} aria-hidden={obscure}>{item.secondaryText}</span> : null}
+  </button>{hidden && <button className="echo-reveal" onMouseEnter={() => setRevealed(true)} onMouseLeave={() => setRevealed(false)} onFocus={() => setRevealed(true)} onBlur={() => setRevealed(false)} aria-label="临时显示字幕">查看字幕</button>}{children}</li>;
 });
 
 function ShortcutDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -99,7 +105,7 @@ function ShortcutDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
     <Dialog.Overlay className="echo-dialog-overlay"/>
     <Dialog.Content className="echo-dialog-content echo-shortcut-card" aria-describedby="shortcut-description">
       <div className="echo-dialog-header"><Dialog.Title>键盘快捷键</Dialog.Title><Dialog.Close aria-label="关闭"><X/></Dialog.Close></div>
-      <Dialog.Description id="shortcut-description">在 YouTube、B站页面和侧栏均可使用。视频网站原有的 Space/K 与 Shift+&lt;/&gt; 快捷键也同时有效。</Dialog.Description>
+      <Dialog.Description id="shortcut-description">Space 暂停/恢复自动播放；跟读模式的播放按钮在句尾重播当前片段。输入框或弹窗内保留原有键盘操作。</Dialog.Description>
       {SHORTCUT_SECTIONS.map(section => <section className="echo-shortcut-section" key={section.title}><h2>{section.title}</h2><dl>
         {section.items.map(([keys, description]) => <div key={`${keys}-${description}`}><dt>{keys.split(' / ').map((key, index) => <React.Fragment key={key}>{index ? ' / ' : ''}<kbd>{key}</kbd></React.Fragment>)}</dt><dd>{description}</dd></div>)}
       </dl></section>)}
@@ -129,15 +135,21 @@ function App() {
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(1);
   const [playMode, setPlayMode] = useState<PlayMode>('auto');
+  useEffect(() => { if (!playback) return; const timer = setTimeout(() => setPlayback(''), 3500); return () => clearTimeout(timer); }, [playback]);
+  const [dictation, setDictation] = useState(false);
+  const [practiceEnd, setPracticeEnd] = useState('');
+  const exerciseRef = useRef<ExerciseHandle>(null);
   const [currentTimeMs, setCurrentTimeMs] = useState<number | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const autoRequestedSessionRef = useRef('');
   const desiredSecondaryRef = useRef<string | null>(null);
   const connectionRef = useRef<ReturnType<typeof connectPanel> | null>(null);
+  const practiceClientRef = useRef<ReturnType<typeof createPracticeClient> | null>(null);
+  if (!practiceClientRef.current) practiceClientRef.current = createPracticeClient(message => connectionRef.current?.send(message));
   const viewRef = useRef({ videoId: '', session: '', track: '' });
   const phraseRowsRef = useRef<NonNullable<State['phrases']>>([]);
-  const shortcutHandlerRef = useRef<(action: ShortcutAction) => boolean>(() => false);
+  const shortcutHandlerRef = useRef<(action: ShortcutAction, repeat?: boolean) => boolean>(() => false);
 
   useEffect(() => {
     let active = true;
@@ -158,6 +170,7 @@ function App() {
     }, {
       handshake: value => record(value) && value.version === 1 && typeof value.status === 'string',
       reset: (message, error) => {
+        practiceClientRef.current?.reset(); setDictation(false); setPracticeEnd('');
         setState({ ...emptyState(), status: error ? 'error' : 'waiting', message }); setPlayback(''); setSelected('');
         setCurrentTimeMs(null); setPlaying(false); setRate(1); setPlayMode('auto');
         autoRequestedSessionRef.current = ''; desiredSecondaryRef.current = null;
@@ -165,24 +178,25 @@ function App() {
       },
       message: (value, tabId) => {
         if (!record(value)) return;
-        if (value.type === 'bilibili-shortcut') {
+        if (practiceClientRef.current?.receive(value)) return;
+        if (value.type === 'bilibili-shortcut' || value.type === 'player-shortcut') {
           if (matchesPlaybackBinding(value, viewRef.current) && isShortcutAction(value.action)) shortcutHandlerRef.current(value.action);
           return;
         }
         if (value.type === 'playback' && typeof value.message === 'string') {
-          if (matchesPlaybackBinding(value, viewRef.current)) setPlayback(value.message); return;
-        }
-        if (value.type === 'shadowing-cycle' && typeof value.expectedWaitMs === 'number' && typeof value.actualWaitMs === 'number') {
-          if (matchesPlaybackBinding(value, viewRef.current)) setPlayback(`逐句跟读：等待 ${value.actualWaitMs.toFixed(0)}ms（目标 ${value.expectedWaitMs.toFixed(0)}ms）后已自动播放下一句`);
-          return;
+          if (matchesPlaybackBinding(value, viewRef.current) && !value.message.startsWith('精准定位完成')) setPlayback(value.message); return;
         }
         if (value.type === 'playback-state' && typeof value.currentTimeMs === 'number') {
           if (!matchesPlaybackBinding(value, viewRef.current)) return;
           setCurrentTimeMs(value.currentTimeMs); if (typeof value.playing === 'boolean') setPlaying(value.playing);
           if (typeof value.rate === 'number') setRate(value.rate);
-          if (value.playMode === 'auto' || value.playMode === 'manual' || value.playMode === 'shadowing') setPlayMode(value.playMode);
+          if (value.playMode === 'auto' || value.playMode === 'manual' || value.playMode === 'shadowing' || value.playMode === 'practice') {
+            setPlayMode(value.playMode);
+            if (value.playMode !== 'practice') setDictation(false);
+          }
           const segmentStartMs = value.playMode === 'manual' ? value.manualStartMs
-            : value.playMode === 'shadowing' ? value.shadowingStartMs : undefined;
+            : value.playMode === 'shadowing' ? value.shadowingStartMs
+              : value.playMode === 'practice' ? value.practiceStartMs : undefined;
           if (typeof segmentStartMs === 'number') {
             const active = phraseRowsRef.current.find(row => row.startMs === segmentStartMs);
             if (active) setSelected(active.id);
@@ -193,13 +207,14 @@ function App() {
         if (message.version !== 1) return;
         const next = { videoId: message.video?.videoId ?? '', session: message.video?.session ?? '', track: message.trackId ?? '' };
         if (viewRef.current.session !== next.session || viewRef.current.track !== next.track || message.status !== 'loaded') {
+          practiceClientRef.current?.reset(); setDictation(false); setPracticeEnd('');
           setSelected(''); setPlayback(''); setCurrentTimeMs(null); setPlaying(false); setRate(1); setPlayMode('auto');
         }
         viewRef.current = next; setState({ ...message, tabId });
       },
     });
     connectionRef.current = controller;
-    return () => { controller.dispose(); connectionRef.current = null; };
+    return () => { practiceClientRef.current?.reset(); controller.dispose(); connectionRef.current = null; };
   }, [connection]);
 
   const video = state.video;
@@ -258,12 +273,17 @@ function App() {
 
   const selectedIndex = echoRows.findIndex(item => item.id === selected);
   const playingIndex = activeTimedRowIndex(echoRows, currentTimeMs);
-  const boundedWaiting = !playing && playMode !== 'auto' && selectedIndex >= 0;
+  const boundedWaiting = (playMode === 'shadowing' || playMode === 'practice' || !playing) && playMode !== 'auto' && selectedIndex >= 0;
   const activeIndex = boundedWaiting ? selectedIndex : playingIndex >= 0 ? playingIndex : !playing ? selectedIndex : -1;
   const activeId = echoRows[activeIndex]?.id ?? '';
   const navigationIndex = activeIndex >= 0 ? activeIndex : selectedIndex;
   const previousIndex = navigationIndex < 0 ? -1 : adjacentPlayableRowIndex(echoRows, navigationIndex, -1);
-  const nextIndex = adjacentPlayableRowIndex(echoRows, navigationIndex, 1);
+  const endIndex = playMode === 'practice' ? Math.max(navigationIndex, echoRows.findIndex(row => row.id === practiceEnd)) : navigationIndex;
+  const nextIndex = adjacentPlayableRowIndex(echoRows, endIndex, 1);
+  const practiceSegment: PracticeSegment | null = video && state.trackId && navigationIndex >= 0 && endIndex >= navigationIndex ? {
+    videoId: video.videoId, session: video.session, trackId: state.trackId, startMs: echoRows[navigationIndex]!.startMs!,
+    endMs: echoRows[endIndex]!.endMs!, text: echoRows.slice(navigationIndex, endIndex + 1).map(row => row.text).join(' '),
+  } : null;
 
   useEffect(() => {
     if (!activeId) return;
@@ -273,42 +293,60 @@ function App() {
     if (bounds.top < 58 || bounds.bottom > innerHeight - 58) element.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }, [activeId]);
 
-  const activateEchoRow = (index: number, intent: 'select' | 'previous' | 'next' | 'replay' | 'shadowing' = 'select') => {
+  const activateEchoRow = (index: number, intent: 'select' | 'previous' | 'next' | 'replay' | 'shadowing' | 'practice' = 'select', rangeEnd?: number) => {
     const item = echoRows[index]; if (!item || item.startMs === null || item.endMs === null || item.endMs <= item.startMs) return;
-    const requestedMode: PlayMode = intent === 'previous' || intent === 'next' || intent === 'replay' ? 'manual'
-      : intent === 'shadowing' ? 'shadowing' : playMode;
+    const requestedMode: PlayMode = intent === 'shadowing' || intent === 'practice' ? intent
+      : playMode === 'shadowing' || playMode === 'practice' ? playMode
+        : intent === 'previous' || intent === 'next' || intent === 'replay' ? 'manual' : playMode;
     if (requestedMode !== playMode) setPlayMode(requestedMode);
+    const last = rangeEnd ?? (intent === 'replay' && playMode === 'practice' ? endIndex : index);
+    setPracticeEnd(echoRows[last]?.id ?? item.id);
     setCurrentTimeMs(null); setSelected(item.id); setPlayback('');
     connectionRef.current?.send({ version: 1, type: 'seek', ...('phraseId' in item ? { phraseId: item.phraseId } : { cueId: item.cueId }),
+      ...(requestedMode === 'practice' ? { endPhraseId: echoRows[last]?.id ?? item.id } : {}),
       playMode: requestedMode, intent, videoId: video?.videoId, session: video?.session, trackId: state.trackId });
   };
   const togglePlayback = () => {
-    if (playMode !== 'auto') {
-      setPlayMode('auto'); setPlayback('自动连续播放已开启');
-      connectionRef.current?.send({ version: 1, type: 'playback-toggle', videoId: video?.videoId, session: video?.session, trackId: state.trackId });
-    }
-    else if (selectedIndex < 0 && activeIndex < 0) activateEchoRow(nextIndex);
-    else connectionRef.current?.send({ version: 1, type: 'playback-toggle', videoId: video?.videoId, session: video?.session, trackId: state.trackId });
+    setPlayback('');
+    // The content script reads the actual paused state; a stale UI update or
+    // an uncovered caption gap must never turn a pause into a seek.
+    connectionRef.current?.send({ version: 1, type: 'playback-toggle', videoId: video?.videoId, session: video?.session, trackId: state.trackId });
   };
   const setPlaybackMode = (mode: PlayMode) => {
     setPlayMode(mode); connectionRef.current?.send({ version: 1, type: 'playback-mode', mode, videoId: video?.videoId, session: video?.session, trackId: state.trackId });
     setPlayback(mode === 'manual' ? '手动按句模式：将在当前句尾暂停'
-      : mode === 'shadowing' ? '逐句跟读已开启：每句后自动留出等长练习时间 (E)' : '自动连续播放已开启 (E)');
+      : mode === 'shadowing' ? '逐句跟读已开启 (E)' : mode === 'practice' ? '跟读模式已开启：录音与听写练习' : '自动连续播放已开启 (E)');
   };
   const toggleShadowing = () => {
-    if (playMode === 'shadowing') { setPlaybackMode('auto'); return; }
+    if (playMode === 'shadowing') { setDictation(false); setPlaybackMode('auto'); return; }
     const index = navigationIndex >= 0 ? navigationIndex : nextIndex;
     if (index >= 0) {
-      setPlayMode('shadowing'); setPlayback('逐句跟读已开启：每句后自动留出等长练习时间 (E)');
-      activateEchoRow(index, 'shadowing');
+      setPlayMode('shadowing'); activateEchoRow(index, 'shadowing');
+      setPlayback('逐句跟读已开启 (E)');
     } else setPlaybackMode('shadowing');
+  };
+  const togglePracticeMode = () => {
+    if (playMode === 'practice') { setDictation(false); setPlaybackMode('auto'); return; }
+    const index = navigationIndex >= 0 ? navigationIndex : nextIndex;
+    if (index >= 0) {
+      activateEchoRow(index, 'practice');
+      setPlayback('跟读模式已开启：录音与听写练习');
+    } else setPlaybackMode('practice');
   };
   const setPlaybackRate = (next: number) => {
     if (next === rate || !(PLAYBACK_RATES as readonly number[]).includes(next)) return;
     setRate(next); connectionRef.current?.send({ version: 1, type: 'playback-rate', rate: next, videoId: video?.videoId, session: video?.session, trackId: state.trackId });
   };
   const changeRate = (direction: -1 | 1) => setPlaybackRate(adjacentPlaybackRate(rate, direction));
-  const reserved = (feature: string) => setPlayback(`${feature}按钮已预留，当前版本尚未开放。`);
+  const toggleDictation = () => { if (playMode === 'practice') setDictation(value => !value); };
+  const resizePractice = (edge: 'start' | 'end', direction: -1 | 1) => {
+    if (playMode !== 'practice' || !practiceSegment) return;
+    const first = edge === 'start' ? navigationIndex + direction : navigationIndex;
+    const last = edge === 'end' ? endIndex + direction : endIndex;
+    if (first < 0 || last < first || last >= echoRows.length) return;
+    if (echoRows[last]!.endMs! - echoRows[first]!.startMs! > 60_000) { setPlayback('练习片段最长 60 秒'); return; }
+    activateEchoRow(first, 'practice', last);
+  };
   const refreshCaptions = () => {
     if (isBilibili) connectionRef.current?.send({ version: 1, type: 'refresh' });
     else if (video && primaryTrack) {
@@ -331,8 +369,9 @@ function App() {
     } else delete root.dataset.nativeRequestCompletedAt;
   }, [echoRows.length, state.status, state.nativeTimeline, video?.videoId]);
 
-  shortcutHandlerRef.current = action => {
+  shortcutHandlerRef.current = (action, repeat = false) => {
     if (view !== 'reader' || shortcutsOpen || guideOpen || state.status !== 'loaded') return false;
+    if (repeat) return action === 'play';
     if (action === 'help') setShortcutsOpen(true);
     else if (action === 'slower') changeRate(-1);
     else if (action === 'faster') changeRate(1);
@@ -341,14 +380,19 @@ function App() {
     else if (action === 'replay' && navigationIndex >= 0) activateEchoRow(navigationIndex, 'replay');
     else if (action === 'next' && nextIndex >= 0) activateEchoRow(nextIndex, 'next');
     else if (action === 'shadowing') toggleShadowing();
-    else if (action === 'reserved') reserved('听写或跟读录音');
+    else if (action === 'dictation' && playMode === 'practice') toggleDictation();
+    else if (action === 'expand-start') resizePractice('start', -1);
+    else if (action === 'contract-start') resizePractice('start', 1);
+    else if (action === 'expand-end') resizePractice('end', 1);
+    else if (action === 'contract-end') resizePractice('end', -1);
+    else if (playMode === 'practice' && exerciseRef.current?.shortcut(action)) return true;
     else return false;
     return true;
   };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const action = shortcutAction(event);
-      if (action && shortcutHandlerRef.current(action)) event.preventDefault();
+      const action = shortcutAction(event, true);
+      if (action && shortcutHandlerRef.current(action, event.repeat)) event.preventDefault();
     };
     addEventListener('keydown', onKey); return () => removeEventListener('keydown', onKey);
   }, []);
@@ -378,19 +422,48 @@ function App() {
         </DropdownMenu.Content></DropdownMenu.Portal>
       </DropdownMenu.Root>
     </header>
-    {playback ? <p className="echo-toast" role="status">{playback}</p> : null}
+    <p className="echo-toast" role="status">{playback || (playMode === 'shadowing' ? '逐句跟读已开启 (E)'
+      : playMode === 'practice' ? '跟读模式已开启：录音与听写练习'
+        : playMode === 'manual' ? '手动按句模式：将在当前句尾暂停' : '自动连续播放已开启 (E)')}</p>
     {state.secondaryMessage ? <p className={`echo-notice ${state.secondaryStatus === 'error' ? 'failed' : ''}`}>{state.secondaryMessage}</p> : null}
     {state.timingMessage ? <p className="echo-notice">{state.timingMessage}</p> : null}
-    <ol className="echo-list">{echoRows.map((item, index) => <EchoCueRow key={item.id} item={item} index={index} active={activeId === item.id} onActivate={activateEchoRow}/>)}</ol>
+    <ol className="echo-list">{echoRows.map((item, index) => <EchoCueRow key={item.id} item={item} index={index}
+      active={playMode === 'practice' ? index >= navigationIndex && index <= endIndex : activeId === item.id} hidden={playMode === 'practice' && dictation} onActivate={activateEchoRow}>
+      {playMode === 'practice' && index === endIndex && practiceSegment && <>
+        <div className="echo-segment-controls" aria-label="调整练习片段">
+          <button title="向前扩展 ([)" aria-label="向前扩展片段" disabled={navigationIndex <= 0} onClick={() => resizePractice('start', -1)}><ArrowUp/><Plus/></button>
+          <button title="收缩开头 (Shift+[)" aria-label="收缩片段开头" disabled={endIndex <= navigationIndex} onClick={() => resizePractice('start', 1)}><ArrowUp/><Minus/></button>
+          <button title="收缩结尾 (Shift+])" aria-label="收缩片段结尾" disabled={endIndex <= navigationIndex} onClick={() => resizePractice('end', -1)}><ArrowDown/><Minus/></button>
+          <button title="向后扩展 (])" aria-label="向后扩展片段" disabled={endIndex >= echoRows.length - 1} onClick={() => resizePractice('end', 1)}><ArrowDown/><Plus/></button>
+        </div>
+        <Suspense fallback={<p role="status">正在加载练习…</p>}><ShadowingExerciseCard key={livePracticeKey(practiceSegment)} ref={exerciseRef}
+          segment={practiceSegment} dictation={dictation} currentTimeMs={currentTimeMs} request={(type, signal) => practiceClientRef.current!.request(type, practiceSegment,
+            echoRows[navigationIndex]!.id, echoRows[endIndex]!.id, signal)}/></Suspense>
+      </>}
+    </EchoCueRow>)}</ol>
     <footer className="echo-player">
       <button aria-label="上一句" title="上一句 (A)" disabled={previousIndex < 0} onClick={() => activateEchoRow(previousIndex, 'previous')}><SkipBack/></button>
-      <button className="echo-play" aria-label={playMode === 'auto' && playing ? '暂停' : '播放'}
-        title={playMode === 'auto' ? '播放/暂停 (Space / K)' : '播放并切回自动连续模式 (Space / K)'} onClick={togglePlayback}>
-        {playMode === 'auto' && playing ? <Pause/> : <Play/>}
+      <button className="echo-play" aria-label={playing ? '暂停' : '播放'}
+        title="播放/暂停 (Space)" onClick={togglePlayback}>
+        {playing ? <Pause/> : <Play/>}
       </button>
       <button aria-label="下一句" title="下一句 (D)" disabled={nextIndex < 0} onClick={() => activateEchoRow(nextIndex, 'next')}><SkipForward/></button>
-      <button className={`echo-shadowing ${playMode === 'shadowing' ? 'active' : ''}`} data-play-mode-control="shadowing" aria-label="逐句跟读"
-        aria-pressed={playMode === 'shadowing'} title="逐句跟读 (E)" onClick={toggleShadowing}>逐句跟读</button>
+      <button
+        id="btn-sentence-shadowing"
+        type="button"
+        aria-label="切换逐句跟读"
+        aria-pressed={playMode === 'shadowing'}
+        aria-keyshortcuts="E"
+        title={playMode === 'shadowing' ? '关闭逐句跟读 (E)' : '开启逐句跟读 (E)'}
+        style={{
+          border: '1px solid #e28743', color: '#b85d19', background: playMode === 'shadowing' ? '#fee3a8' : '#fff7ed',
+          padding: '2px 8px', borderRadius: 6, fontSize: 12, cursor: 'pointer', margin: '0 4px',
+          flex: '0 0 auto', width: 'auto', whiteSpace: 'nowrap',
+        }}
+        onClick={toggleShadowing}
+      >
+        逐句跟读
+      </button>
       <button aria-label="重新播放当前句" title="重播当前句 (S)" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex, 'replay')}><RefreshCw/></button>
       <span className="echo-player-spacer"/>
       <Popover.Root><Popover.Trigger asChild><button className="echo-rate" aria-label="播放速度" title="播放速度">{rate}x</button></Popover.Trigger>
@@ -405,8 +478,8 @@ function App() {
           <Popover.Arrow className="echo-popover-arrow"/>
         </Popover.Content></Popover.Portal>
       </Popover.Root>
-      <button aria-label="听写模式（暂未开放）" title="听写模式（暂未开放）" onClick={() => reserved('听写模式')}><BookOpen/></button>
-      <button aria-label="跟读录音（暂未开放）" title="跟读录音（暂未开放）" onClick={() => reserved('跟读录音与评分')}><Mic/></button>
+      {playMode === 'practice' && <button className={`practice-mode ${dictation ? 'active' : ''}`} aria-label="听写模式" aria-pressed={dictation} title="听写模式 (H)" onClick={toggleDictation}><BookOpen/></button>}
+      <button className={`practice-mode ${playMode === 'practice' ? 'active' : ''}`} data-play-mode-control="practice" aria-label="跟读模式" aria-pressed={playMode === 'practice'} title="跟读模式：录音与听写" onClick={togglePracticeMode}><Mic/></button>
     </footer>
     <ShortcutDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}/><GuideDialog open={guideOpen} onOpenChange={setGuideOpen}/>
   </main>;

@@ -1,3 +1,4 @@
+import { captureVideoAudio } from './capture-audio.ts';
 import type { PlayMode } from './protocol.ts';
 
 export type PlaybackBoundary = { startMs: number; endMs: number };
@@ -5,26 +6,19 @@ type ActivePlayMode = Exclude<PlayMode, 'auto'>;
 
 export type PlaybackMachineState =
   | { mode: PlayMode; phase: 'idle'; generation: number }
-  | { mode: 'manual'; phase: 'seeking' | 'playing'; generation: number;
+  | { mode: 'manual' | 'practice'; phase: 'seeking' | 'playing'; generation: number;
       segment: PlaybackBoundary; queue: PlaybackBoundary[] }
   | { mode: 'shadowing'; phase: 'seeking' | 'playing'; generation: number;
       segment: PlaybackBoundary; queue: PlaybackBoundary[] }
-  | { mode: 'manual'; phase: 'waiting'; generation: number; segment: PlaybackBoundary;
+  | { mode: 'manual' | 'practice'; phase: 'waiting'; generation: number; segment: PlaybackBoundary;
       queue: PlaybackBoundary[]; boundaryDetectedErrorMs: number; boundaryErrorMs: number }
   | { mode: 'shadowing'; phase: 'waiting'; generation: number; segment: PlaybackBoundary;
       queue: PlaybackBoundary[]; boundaryDetectedErrorMs: number; boundaryErrorMs: number;
-      waitDurationMs: number; waitingStartedAtMs: number; resumeAtMs: number };
+      waitDurationMs: number; resumeAtMs: number };
+
+type ShadowingWait = Extract<PlaybackMachineState, { mode: 'shadowing'; phase: 'waiting' }>;
 
 export type PreciseSeekResult = { requestedMs: number; actualMs: number; errorMs: number };
-export type ShadowingCycleReport = {
-  segment: PlaybackBoundary;
-  next: PlaybackBoundary;
-  expectedWaitMs: number;
-  actualWaitMs: number;
-  waitErrorMs: number;
-  boundaryDetectedErrorMs: number;
-  boundaryErrorMs: number;
-};
 
 export type BrakeTrigger = 'poller' | 'media-event' | 'arm';
 export type BrakeReport = {
@@ -47,11 +41,8 @@ type ControllerOptions<Owner> = {
   pauseAtBoundary?: (video: HTMLVideoElement) => void;
   onState?: (state: PlaybackMachineState) => void;
   onBrake?: (owner: Owner, report: BrakeReport) => void;
-  onShadowingCycle?: (owner: Owner, report: ShadowingCycleReport) => void;
-  now?: () => number;
 };
 
-type ShadowingPreparation = Promise<{ result: PreciseSeekResult } | { error: unknown }>;
 
 const SEEK_TIMEOUT_MS = 3_000;
 export const SEEK_TOLERANCE_MS = 80;
@@ -77,8 +68,8 @@ export class PrecisePlaybackController<Owner> {
   private seekListener: AbortController | null = null;
   private brakePoller: ReturnType<typeof setInterval> | null = null;
   private brakePollTicks = 0;
+  private captureAbort: AbortController | null = null;
   private shadowingTimer: ReturnType<typeof setTimeout> | null = null;
-  private shadowingPreparation: ShadowingPreparation | null = null;
 
   constructor(options: ControllerOptions<Owner>) { this.options = options; }
 
@@ -87,9 +78,6 @@ export class PrecisePlaybackController<Owner> {
   get brakePollerActive() { return this.brakePoller !== null; }
   owns(owner: Owner) { return this.owner === owner; }
 
-  private now() {
-    return this.options.now?.() ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
-  }
 
   private brakeLeadMs() {
     const configured = this.options.brakeLeadMs;
@@ -118,7 +106,7 @@ export class PrecisePlaybackController<Owner> {
     this.seekListener = null;
     this.clearBrakePoller();
     this.clearShadowingTimer();
-    this.shadowingPreparation = null;
+    this.captureAbort?.abort(); this.captureAbort = null;
     this.owner = null;
     this.emit({ mode, phase: 'idle', generation: this.generation });
     return this.generation;
@@ -134,7 +122,12 @@ export class PrecisePlaybackController<Owner> {
     this.videoListeners = listeners;
     const signal = listeners.signal;
     video.addEventListener('timeupdate', () => this.enforceBoundary('media-event'), { signal });
-    video.addEventListener('play', () => this.startBrakePoller(), { signal });
+    video.addEventListener('play', () => {
+      // An explicit native play cancels the wait. Automatic next-sentence play
+      // has already entered `playing` before firing this event.
+      if (this.stateValue.mode === 'shadowing' && this.stateValue.phase === 'waiting') this.invalidate('auto');
+      this.startBrakePoller();
+    }, { signal });
     video.addEventListener('playing', () => this.startBrakePoller(), { signal });
     video.addEventListener('pause', () => this.clearBrakePoller(), { signal });
     video.addEventListener('seeking', () => this.clearBrakePoller(), { signal });
@@ -183,6 +176,7 @@ export class PrecisePlaybackController<Owner> {
   private async preciseSeek(video: HTMLVideoElement, targetMs: number, token: number, owner: Owner): Promise<PreciseSeekResult> {
     let actualMs = video.currentTime * 1000;
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (!this.operationCurrent(token, owner, video)) throw new Error('定位请求已失效');
       const completion = this.waitForSeek(video, token, owner);
       video.currentTime = targetMs / 1000;
       await completion;
@@ -202,7 +196,7 @@ export class PrecisePlaybackController<Owner> {
     const bounded = { startMs: segment.startMs, endMs: Math.min(segment.endMs, video.duration * 1000) };
     if (!validBoundary(bounded) || bounded.startMs >= video.duration * 1000) throw new Error('条目时间超出当前视频，未执行定位');
     const boundedQueue = queue.filter(validBoundary).map(item => ({ startMs: item.startMs, endMs: Math.min(item.endMs, video.duration * 1000) }))
-      .filter(validBoundary);
+      .filter(item => validBoundary(item) && item.endMs > bounded.endMs);
     const token = this.invalidate(mode);
     this.owner = owner;
     if (mode !== 'auto') this.emit({ mode, phase: 'seeking', generation: token, segment: bounded, queue: boundedQueue });
@@ -223,7 +217,7 @@ export class PrecisePlaybackController<Owner> {
     const bounded = { startMs: segment.startMs, endMs: Math.min(segment.endMs, video.duration * 1000) };
     if (!validBoundary(bounded)) return false;
     const boundedQueue = queue.filter(validBoundary).map(item => ({ startMs: item.startMs, endMs: Math.min(item.endMs, video.duration * 1000) }))
-      .filter(validBoundary);
+      .filter(item => validBoundary(item) && item.endMs > bounded.endMs);
     const token = this.invalidate(mode);
     this.owner = owner;
     this.emit({ mode, phase: 'playing', generation: token, segment: bounded, queue: boundedQueue });
@@ -249,24 +243,90 @@ export class PrecisePlaybackController<Owner> {
   async toggle(_owner: Owner) {
     const video = this.currentVideo();
     if (!video || video.readyState === 0) return;
-    if (this.stateValue.mode !== 'auto') {
-      // The play control is the single, atomic escape hatch from every bounded
-      // mode. It must never consume a queued phrase or pause an already-playing
-      // manual/shadowing segment.
+    if (video.paused) {
+      // Resume from the actual media position in continuous mode. Invalidate
+      // old sentence boundaries before calling play().
       this.invalidate('auto');
-      if (video.paused) await video.play();
+      await video.play();
+    } else {
+      video.pause();
+      // A pause must work on the first press in every mode, and stay paused.
+      this.invalidate();
+    }
+  }
+
+  async togglePractice(_owner: Owner) {
+    const video = this.currentVideo();
+    if (!video || video.readyState === 0) return;
+    const current = this.stateValue;
+    if (current.mode === 'practice' && current.phase !== 'idle') {
+      if (!video.paused) { this.pause(_owner); return; }
+      if (video.currentTime * 1000 >= current.segment.endMs - this.brakeLeadMs()
+        || video.currentTime * 1000 < current.segment.startMs) {
+        await this.seek(_owner, current.segment, current.queue, 'practice');
+      } else {
+        this.emit({ ...current, phase: 'playing' }); await video.play(); this.startBrakePoller();
+      }
       return;
     }
-    if (video.paused) await video.play();
-    else video.pause();
+    // Recording controls never take over the independent sentence-pause mode.
+  }
+
+  pause(owner: Owner) {
+    const video = this.currentVideo();
+    if (!video || (this.owner !== null && this.owner !== owner)) return;
+    // Preserve the active practice range when recording or pausing midway.
+    const current = this.stateValue;
+    if ((current.mode === 'shadowing' || current.mode === 'practice') && current.phase !== 'idle') {
+      const generation = this.invalidate(current.mode);
+      this.owner = owner;
+      this.emit({ ...current, generation });
+    }
+    video.pause(); this.clearBrakePoller();
+  }
+
+  cancelCapture(owner: Owner) {
+    if (this.owner === owner) this.captureAbort?.abort();
+  }
+
+  async capture(owner: Owner, segment: PlaybackBoundary) {
+    const video = this.currentVideo();
+    if (!video || !validBoundary(segment) || segment.endMs - segment.startMs > 60_000
+      || segment.endMs > video.duration * 1000) throw new Error('原声片段无效或超过 60 秒');
+    const previous = this.stateValue, oldTime = video.currentTime, oldRate = video.playbackRate, wasPlaying = !video.paused;
+    const token = this.invalidate(previous.mode); this.owner = owner;
+    const abort = new AbortController(); this.captureAbort = abort;
+    let capturing = false;
+    const userSeek = () => { if (capturing && this.operationCurrent(token, owner, video)) this.invalidate(previous.mode); };
+    abort.signal.addEventListener('abort', () => { video.pause(); video.playbackRate = oldRate; }, { once: true });
+    video.pause(); video.playbackRate = 1;
+    try {
+      await this.preciseSeek(video, segment.startMs, token, owner);
+      if (abort.signal.aborted) throw new Error('原声采集已取消');
+      capturing = true; video.addEventListener('seeking', userSeek);
+      return await captureVideoAudio(video, segment.endMs, abort.signal);
+    } finally {
+      capturing = false; video.removeEventListener('seeking', userSeek);
+      // A new seek, video session or disconnected panel owns the player now.
+      // Never let this old capture restore its position over that operation.
+      if (this.operationCurrent(token, owner, video)) {
+        this.captureAbort = null; video.pause(); video.playbackRate = oldRate;
+        await this.preciseSeek(video, oldTime * 1000, token, owner);
+        if (this.operationCurrent(token, owner, video)) {
+          this.emit({ ...previous, generation: token });
+          if (wasPlaying) { await video.play(); this.startBrakePoller(); }
+        }
+      }
+    }
   }
 
   private startBrakePoller() {
     this.clearBrakePoller();
     const current = this.stateValue;
     const video = this.video;
-    if (!video || current.mode === 'auto' || current.phase !== 'playing' || video.paused || !this.owner
+    if (!video || video.paused || !this.owner
       || !this.options.ownerActive(this.owner)) return;
+    if (current.mode === 'auto' || current.phase !== 'playing' || video.paused) return;
     const token = current.generation;
     this.brakePollTicks = 0;
     this.brakePoller = setInterval(() => {
@@ -279,37 +339,33 @@ export class PrecisePlaybackController<Owner> {
     }, BRAKE_POLL_INTERVAL_MS);
   }
 
-  private async resumeShadowing(owner: Owner, waiting: Extract<PlaybackMachineState, { mode: 'shadowing'; phase: 'waiting' }>) {
-    if (this.stateValue !== waiting || this.owner !== owner || !this.options.ownerActive(owner)) return;
-    const next = waiting.queue[0];
-    const video = this.video;
-    const preparation = this.shadowingPreparation;
-    if (!next || !video || !preparation) return;
+  private scheduleShadowing(waiting: ShadowingWait, owner: Owner) {
+    this.clearShadowingTimer();
+    if (!waiting.queue.length || this.stateValue !== waiting) return;
+    // Use the subtitle's media duration, independent of playback speed. Keep
+    // the end frame visible while the learner speaks; seek only when due.
+    this.shadowingTimer = setTimeout(() => {
+      this.shadowingTimer = null;
+      if (this.stateValue !== waiting) return;
+      if (performance.now() < waiting.resumeAtMs) { this.scheduleShadowing(waiting, owner); return; }
+      void this.resumeShadowing(waiting, owner);
+    }, Math.max(1, waiting.resumeAtMs - performance.now()));
+  }
+
+  private async resumeShadowing(waiting: ShadowingWait, owner: Owner) {
+    const video = this.video, next = waiting.queue[0];
+    if (!video || !next || this.stateValue !== waiting || this.options.getVideo() !== video
+      || !this.operationCurrent(waiting.generation, owner, video)) return;
+    const state = { mode: 'shadowing' as const, generation: waiting.generation, segment: next, queue: waiting.queue.slice(1) };
+    this.emit({ ...state, phase: 'seeking' });
     try {
-      const prepared = await preparation;
-      if (this.stateValue !== waiting || this.owner !== owner || this.video !== video || !this.options.ownerActive(owner)) return;
-      if ('error' in prepared) throw prepared.error;
-      this.shadowingPreparation = null;
-      const actualWaitMs = this.now() - waiting.waitingStartedAtMs;
-      const playPromise = video.play();
-      this.emit({ mode: 'shadowing', phase: 'playing', generation: waiting.generation,
-        segment: next, queue: waiting.queue.slice(1) });
-      await playPromise;
-      this.options.onShadowingCycle?.(owner, {
-        segment: waiting.segment,
-        next,
-        expectedWaitMs: waiting.waitDurationMs,
-        actualWaitMs,
-        waitErrorMs: actualWaitMs - waiting.waitDurationMs,
-        boundaryDetectedErrorMs: waiting.boundaryDetectedErrorMs,
-        boundaryErrorMs: waiting.boundaryErrorMs,
-      });
+      await this.preciseSeek(video, next.startMs, waiting.generation, owner);
+      if (this.options.getVideo() !== video || !this.operationCurrent(waiting.generation, owner, video)) return;
+      this.emit({ ...state, phase: 'playing' });
+      await video.play();
       if (this.operationCurrent(waiting.generation, owner, video)) this.startBrakePoller();
-    } catch (error) {
-      // A new user action, SPA navigation, or detached port deliberately
-      // invalidates the pending cycle. A genuine media failure leaves the
-      // controller idle instead of retaining a stale sentence boundary.
-      if (this.owner === owner && this.stateValue.generation === waiting.generation) this.invalidate('shadowing');
+    } catch {
+      if (this.operationCurrent(waiting.generation, owner, video)) this.invalidate('shadowing');
     }
   }
 
@@ -319,11 +375,21 @@ export class PrecisePlaybackController<Owner> {
     const owner = this.owner;
     if (!video || !owner || current.mode === 'auto' || current.phase !== 'playing' || !this.options.ownerActive(owner)) return;
     const detectedMs = video.currentTime * 1000;
-    const leadMs = this.brakeLeadMs();
+    // === 逐句暂停拦截 START ===
+    const isShadowingMode = current.mode === 'shadowing';
+    const leadMs = isShadowingMode && trigger !== 'arm' ? 50 : this.brakeLeadMs();
     if (detectedMs < current.segment.endMs - leadMs) return;
+    const errors = { boundaryDetectedErrorMs: detectedMs - current.segment.endMs, boundaryErrorMs: detectedMs - current.segment.endMs };
+    const waitDurationMs = current.segment.endMs - current.segment.startMs;
+    const waiting: PlaybackMachineState = current.mode === 'shadowing'
+      ? { ...current, ...errors, phase: 'waiting', waitDurationMs, resumeAtMs: performance.now() + waitDurationMs }
+      : { ...current, ...errors, phase: 'waiting' };
+    // Change phase before pause() can emit another timeupdate, so one sentence
+    // owns exactly one pause and one timer without mutating the subtitle data.
+    this.stateValue = waiting;
     const pollTicks = this.brakePollTicks;
     // Destroy the high-frequency poller before pause() can synchronously emit
-    // events or Shadowing starts its silence timer. This keeps one owner and
+    // events can attempt a second boundary check. This keeps one owner and
     // one interval per bounded playback generation.
     this.clearBrakePoller();
     try { this.options.pauseAtBoundary?.(video); } catch { /* Element-level pause below remains authoritative. */ }
@@ -348,34 +414,14 @@ export class PrecisePlaybackController<Owner> {
       actualMs,
       driftMs: boundaryErrorMs,
     });
-    if (current.mode === 'manual') {
-      this.emit({ ...current, phase: 'waiting', boundaryDetectedErrorMs, boundaryErrorMs });
-      return;
-    }
-    const waitDurationMs = current.segment.endMs - current.segment.startMs;
-    const waitingStartedAtMs = this.now();
-    const waiting: Extract<PlaybackMachineState, { mode: 'shadowing'; phase: 'waiting' }> = {
-      ...current,
-      phase: 'waiting',
-      boundaryDetectedErrorMs,
-      boundaryErrorMs,
-      waitDurationMs,
-      waitingStartedAtMs,
-      resumeAtMs: waitingStartedAtMs + waitDurationMs,
-    };
-    this.emit(waiting);
-    const next = waiting.queue[0];
-    if (!next) return;
-    // Seek while the learner is speaking so that buffering cannot lengthen the
-    // requested silent interval. The media remains paused; play() is called by
-    // the deadline timer below.
-    this.shadowingPreparation = Promise.resolve()
-      .then(() => this.preciseSeek(video, next.startMs, current.generation, owner))
-      .then(result => ({ result }), error => ({ error }));
-    this.shadowingTimer = setTimeout(() => {
-      this.shadowingTimer = null;
-      void this.resumeShadowing(owner, waiting);
-    }, waitDurationMs);
+    if (this.stateValue !== waiting || !this.operationCurrent(current.generation, owner, video)) return;
+    const paused = { ...waiting, boundaryDetectedErrorMs, boundaryErrorMs };
+    this.emit(paused);
+    if (paused.mode === 'shadowing') this.scheduleShadowing(paused, owner);
+    if (isShadowingMode) console.log('[SHADOWING_PAUSE_SUCCESS]', {
+      start: current.segment.startMs / 1000, time: video.currentTime, end: current.segment.endMs / 1000,
+    });
+    // === 逐句暂停拦截 END ===
   }
 
   clear(mode: PlayMode = this.mode) { this.invalidate(mode); }

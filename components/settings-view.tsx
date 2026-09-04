@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import * as Select from '@radix-ui/react-select';
-import { ArrowLeft, Check, ChevronDown, CircleSlash2, Database, Languages, Palette, RotateCcw, Sparkles } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, CircleSlash2, Database, Languages, Palette, RotateCcw, Sparkles } from './icons';
 import { SERVICE_CHANNEL, type PublicSettings, type ServiceReply, type ThemeSetting } from '../lib/settings';
 import { applyTheme } from '../lib/theme';
 import './settings-view.css';

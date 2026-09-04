@@ -22,7 +22,7 @@ export function adjacentPlaybackRate(current: number, direction: -1 | 1) {
   return PLAYBACK_RATES[index + direction] ?? current;
 }
 
-export type PlayMode = 'auto' | 'manual' | 'shadowing';
+export type PlayMode = 'auto' | 'manual' | 'shadowing' | 'practice';
 
 export const PLAYER_SHORTCUTS = {
   playOrPause: 'Space',

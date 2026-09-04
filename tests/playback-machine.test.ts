@@ -28,12 +28,10 @@ class FakeVideo extends EventTarget {
 }
 
 function controller(videoRef: { current: FakeVideo }, active = new Set(['panel']),
-  onShadowingCycle?: ConstructorParameters<typeof PrecisePlaybackController<string>>[0]['onShadowingCycle'],
   onBrake?: ConstructorParameters<typeof PrecisePlaybackController<string>>[0]['onBrake']) {
   return new PrecisePlaybackController<string>({
     getVideo: () => videoRef.current as unknown as HTMLVideoElement,
     ownerActive: owner => active.has(owner),
-    onShadowingCycle,
     onBrake,
   });
 }
@@ -50,7 +48,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 250) {
 test('manual uses one fixed 12ms poller, pre-brakes at 30ms, and calibrates within 20ms without a media event', async t => {
   const videoRef = { current: new FakeVideo() };
   let brake: BrakeReport | undefined;
-  const playback = controller(videoRef, new Set(['panel']), undefined, (_owner, report) => { brake = report; });
+  const playback = controller(videoRef, new Set(['panel']), (_owner, report) => { brake = report; });
   t.after(() => playback.destroy());
   await playback.seek('panel', { startMs: 1_000, endMs: 2_000 }, [], 'manual');
   assert.equal(playback.brakePollerActive, true);
@@ -126,54 +124,145 @@ test('play from a manual boundary atomically switches to auto without consuming 
   playback.destroy();
 });
 
-test('play while a manual sentence is already playing switches to auto and does not pause it', async () => {
-  const videoRef = { current: new FakeVideo() };
-  const playback = controller(videoRef);
-  await playback.seek('panel', { startMs: 1_000, endMs: 2_000 }, [], 'manual');
-  const plays = videoRef.current.plays;
-  await playback.toggle('panel');
-  assert.equal(playback.mode, 'auto'); assert.equal(videoRef.current.paused, false);
-  assert.equal(videoRef.current.plays, plays);
-  playback.destroy();
-});
+for (const mode of ['auto', 'manual', 'shadowing', 'practice'] as const) {
+  test(`Space pauses ${mode} playback once, then resumes in auto without seeking`, async t => {
+    const videoRef = { current: new FakeVideo() };
+    const playback = controller(videoRef);
+    t.after(() => playback.destroy());
+    await playback.seek('panel', { startMs: 1_000, endMs: 2_000 }, [{ startMs: 3_000, endMs: 4_000 }], mode);
+    videoRef.current.moveTo(1.3);
+    const plays = videoRef.current.plays, pauses = videoRef.current.pauses;
 
-test('shadowing pauses at the exact boundary, waits one phrase duration, then plays the next phrase', async t => {
-  const videoRef = { current: new FakeVideo() };
-  let cycle: Parameters<NonNullable<ConstructorParameters<typeof PrecisePlaybackController<string>>[0]['onShadowingCycle']>>[1] | undefined;
-  let brake: BrakeReport | undefined;
-  const playback = controller(videoRef, new Set(['panel']), (_owner, report) => { cycle = report; },
-    (_owner, report) => { brake = report; });
+    await playback.toggle('panel');
+    assert.equal(videoRef.current.paused, true, 'one press must pause even in a bounded mode');
+    assert.equal(videoRef.current.pauses, pauses + 1);
+    assert.equal(videoRef.current.plays, plays);
+    assert.equal(playback.brakePollerActive, false);
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.equal(videoRef.current.paused, true, 'a cancelled learning cycle must not resume playback');
+    assert.equal(videoRef.current.currentTime, 1.3);
+
+    await playback.toggle('panel');
+    assert.equal(videoRef.current.paused, false);
+    assert.equal(videoRef.current.plays, plays + 1);
+    assert.equal(playback.mode, 'auto');
+    assert.equal(videoRef.current.currentTime, 1.3, 'resume from the paused position, not a subtitle start');
+    videoRef.current.moveTo(2.1);
+    assert.equal(videoRef.current.paused, false, 'auto playback must pass the old sentence boundary');
+    await playback.toggle('panel');
+    assert.equal(videoRef.current.paused, true);
+  });
+}
+
+test('Space during a shadowing wait cancels the timer and resumes continuous playback', async t => {
+  const videoRef = { current: new FakeVideo() }, playback = controller(videoRef);
   t.after(() => playback.destroy());
-  await playback.seek('panel', { startMs: 1_000, endMs: 1_060 }, [{ startMs: 2_000, endMs: 2_080 }], 'shadowing');
-  videoRef.current.setClock(1.031);
-  await waitUntil(() => videoRef.current.paused);
-  assert.equal(videoRef.current.paused, true);
-  assert.ok(brake); assert.equal(brake.actualMs, 1_060);
-  assert.equal(playback.state.mode, 'shadowing'); assert.equal(playback.state.phase, 'waiting');
-  assert.equal(playback.state.waitDurationMs, 60);
-  assert.equal(playback.brakePollerActive, false, 'the brake poller must be destroyed before the silence timer starts');
-  assert.equal(brake.trigger, 'poller'); assert.ok(Math.abs(brake.driftMs) <= BRAKE_PRECISION_MS);
-  for (let attempt = 0; attempt < 30 && !cycle; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
-  assert.ok(cycle); assert.equal(cycle.expectedWaitMs, 60);
-  assert.ok(Math.abs(cycle.actualWaitMs - 60) <= 30, `actual wait ${cycle.actualWaitMs}ms`);
-  assert.equal(cycle.boundaryErrorMs, 0);
-  assert.equal(videoRef.current.currentTime, 2); assert.equal(videoRef.current.paused, false);
-  assert.equal(playback.state.mode, 'shadowing'); assert.equal(playback.state.phase, 'playing');
-  assert.equal(playback.brakePollerActive, true, 'the next phrase owns one fresh brake poller');
+  const segment = { startMs: 1_000, endMs: 1_160 };
+  await playback.seek('panel', segment, [{ startMs: 3_000, endMs: 4_000 }], 'shadowing');
+  videoRef.current.moveTo(1.16);
+  await playback.toggle('panel');
+  assert.equal(playback.mode, 'auto');
+  assert.equal(videoRef.current.currentTime, 1.16, 'play must not replay or skip to another sentence');
+  await new Promise(resolve => setTimeout(resolve, 230));
+  assert.equal(videoRef.current.paused, false);
+  assert.equal(videoRef.current.currentTime, 1.16, 'the cancelled timer must not seek later');
 });
 
-test('play during shadowing silence cancels the old resume timer and switches to auto', async () => {
-  const videoRef = { current: new FakeVideo() };
-  const playback = controller(videoRef);
-  await playback.seek('panel', { startMs: 1_000, endMs: 1_080 }, [{ startMs: 2_000, endMs: 2_080 }], 'shadowing');
-  videoRef.current.moveTo(1.08);
-  await playback.toggle('panel');
-  assert.equal(playback.mode, 'auto'); assert.equal(videoRef.current.paused, false);
+test('native play during a shadowing wait cancels the pending automatic next sentence', async t => {
+  const videoRef = { current: new FakeVideo() }, playback = controller(videoRef);
+  t.after(() => playback.destroy());
+  await playback.seek('panel', { startMs: 1_000, endMs: 1_160 }, [{ startMs: 2_000, endMs: 3_000 }], 'shadowing');
+  videoRef.current.moveTo(1.16);
+  await videoRef.current.play();
+  assert.equal(videoRef.current.paused, false);
+  assert.equal(playback.mode, 'auto');
+  await new Promise(resolve => setTimeout(resolve, 230));
+  assert.equal(videoRef.current.currentTime, 1.16);
+  assert.equal(playback.brakePollerActive, false);
+});
+
+test('shadowing waits each sentence duration then automatically plays the next, for two unequal cycles', async t => {
+  const videoRef = { current: new FakeVideo() }, playback = controller(videoRef);
+  t.after(() => playback.destroy());
+  const sentences = [{ startMs: 1_000, endMs: 1_160 }, { startMs: 2_000, endMs: 2_240 }, { startMs: 3_000, endMs: 3_120 }];
+  videoRef.current.playbackRate = 1.5;
+  await playback.seek('panel', sentences[0], sentences.slice(1), 'shadowing');
+  for (const [index, duration] of [160, 240].entries()) {
+    const start = performance.now(), plays = videoRef.current.plays;
+    videoRef.current.moveTo(sentences[index].endMs / 1000);
+    for (let repeat = 0; repeat < 4; repeat++) videoRef.current.dispatchEvent(new Event('timeupdate'));
+    assert.equal(videoRef.current.paused, true);
+    assert.equal(playback.state.phase, 'waiting');
+    await new Promise(resolve => setTimeout(resolve, duration / 2));
+    assert.equal(videoRef.current.paused, true, 'do not shorten the pause at 1.5x playback rate');
+    assert.equal(videoRef.current.currentTime, sentences[index].endMs / 1000, 'keep the paused sentence on screen');
+    await waitUntil(() => !videoRef.current.paused, 1_000);
+    assert.ok(performance.now() - start >= duration - 2, 'pause must last the full sentence duration');
+    assert.equal(videoRef.current.plays, plays + 1, 'repeated timeupdate must schedule only one next sentence');
+    assert.equal(videoRef.current.currentTime, sentences[index + 1].startMs / 1000);
+    assert.equal(playback.mode, 'shadowing'); assert.equal(playback.state.phase, 'playing');
+  }
+  videoRef.current.moveTo(3.12);
   const plays = videoRef.current.plays;
-  await new Promise(resolve => setTimeout(resolve, 120));
-  assert.equal(videoRef.current.currentTime, 2, 'the next phrase was prepared during the silence window');
-  assert.equal(videoRef.current.plays, plays, 'stale shadowing timer must not play again');
-  playback.destroy();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(videoRef.current.paused, true, 'the last sentence has no next item to play');
+  assert.equal(videoRef.current.plays, plays);
+});
+
+for (const action of ['mode', 'seek', 'recording', 'disconnect', 'destroy', 'replace-video'] as const) {
+  test(`shadowing waiting is cancelled safely by ${action}`, async t => {
+    const active = new Set(['panel']), videoRef = { current: new FakeVideo() }, playback = controller(videoRef, active);
+    t.after(() => playback.destroy());
+    const original = videoRef.current;
+    await playback.seek('panel', { startMs: 1_000, endMs: 1_160 }, [{ startMs: 2_000, endMs: 3_000 }], 'shadowing');
+    original.moveTo(1.16);
+    if (action === 'mode') await playback.setMode('auto', 'panel');
+    if (action === 'seek') await playback.seek('panel', { startMs: 5_000, endMs: 6_000 }, [], 'manual');
+    if (action === 'recording') playback.pause('panel');
+    if (action === 'disconnect') active.clear();
+    if (action === 'destroy') playback.destroy();
+    if (action === 'replace-video') videoRef.current = new FakeVideo();
+    const plays = original.plays, time = original.currentTime;
+    await new Promise(resolve => setTimeout(resolve, 230));
+    assert.equal(original.plays, plays, 'a stale wait must never restart video');
+    assert.equal(original.currentTime, time, 'a stale wait must never overwrite a seek');
+  });
+}
+
+test('recording practice preserves its boundary and resumes in place independently of shadowing', async t => {
+  const videoRef = { current: new FakeVideo() }, playback = controller(videoRef);
+  t.after(() => playback.destroy());
+  await playback.seek('panel', { startMs: 1_000, endMs: 2_000 }, [], 'practice');
+  videoRef.current.moveTo(1.3); playback.pause('panel');
+  assert.equal(videoRef.current.paused, true); assert.equal(playback.mode, 'practice');
+  await playback.togglePractice('panel');
+  assert.equal(videoRef.current.currentTime, 1.3); assert.equal(videoRef.current.paused, false);
+  videoRef.current.moveTo(2.02); assert.equal(videoRef.current.paused, true);
+});
+
+test('recording practice has no timed next-sentence cycle and cancels a previous shadowing wait', async t => {
+  const videoRef = { current: new FakeVideo() }, playback = controller(videoRef);
+  t.after(() => playback.destroy());
+  await playback.seek('panel', { startMs: 1_000, endMs: 1_160 }, [{ startMs: 3_000, endMs: 4_000 }], 'shadowing');
+  videoRef.current.moveTo(1.16);
+  await playback.seek('panel', { startMs: 2_000, endMs: 2_160 }, [{ startMs: 3_000, endMs: 4_000 }], 'practice');
+  videoRef.current.moveTo(2.16);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.equal(videoRef.current.paused, true); assert.equal(videoRef.current.currentTime, 2.16);
+  assert.equal(playback.mode, 'practice'); assert.equal(playback.state.phase, 'waiting');
+  await playback.togglePractice('panel');
+  assert.equal(videoRef.current.currentTime, 2); assert.equal(videoRef.current.paused, false);
+});
+
+test('practice replay cannot take over sentence-only shadowing', async t => {
+  const videoRef = { current: new FakeVideo() }, playback = controller(videoRef);
+  t.after(() => playback.destroy());
+  await playback.seek('panel', { startMs: 1_000, endMs: 1_160 }, [{ startMs: 2_000, endMs: 3_000 }], 'shadowing');
+  videoRef.current.moveTo(1.16);
+  await playback.togglePractice('panel');
+  assert.equal(videoRef.current.currentTime, 1.16); assert.equal(videoRef.current.paused, true);
+  await waitUntil(() => !videoRef.current.paused, 500);
+  assert.equal(videoRef.current.currentTime, 2); assert.equal(playback.mode, 'shadowing');
 });
 
 test('auto mode ignores sentence ends while manual navigation owns the boundary', async () => {

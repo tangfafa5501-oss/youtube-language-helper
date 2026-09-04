@@ -96,7 +96,7 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
     return fetch(url);
   };
   const context = createContext({ console, URL, AbortController, DOMException, CustomEvent, Event, EventTarget, document, location, fetch: pageFetch, Response, TextEncoder, TextDecoder, DataView,
-    crypto: { randomUUID }, setTimeout, clearTimeout, queueMicrotask,
+    crypto: { randomUUID }, performance, setTimeout, clearTimeout, queueMicrotask,
     setInterval: (...args) => { const timer = setInterval(...args); timers.add(timer); return timer; }, clearInterval,
     chrome: { runtime: { id: 'test-extension', onConnect: connect, sendMessage, getURL: path => `chrome-extension://test-extension${path}` } },
   });
@@ -144,9 +144,9 @@ test('production Bilibili bridge automatically fetches an AI track when no manua
   assert.equal(h.messages.some(message => message.source === 'bilibili-ocr' || message.ocr), false);
 });
 
-test('Bilibili page keyboard forwards A/S/D/E with the current binding and consumes each event once', async t => {
+test('Bilibili page keyboard forwards A/S/D/E/Space with the current binding and consumes each event once', async t => {
   const h = await harness(t, { withMain: true, aiOnly: true });
-  for (const [code, action] of [['KeyA', 'previous'], ['KeyS', 'replay'], ['KeyD', 'next'], ['KeyE', 'shadowing']]) {
+  for (const [code, action] of [['KeyA', 'previous'], ['KeyS', 'replay'], ['KeyD', 'next'], ['KeyE', 'shadowing'], ['Space', 'play']]) {
     const before = h.messages.length;
     const event = h.key(code);
     assert.equal(event.defaultPrevented, true); assert.equal(event.stopped, true);
@@ -154,6 +154,8 @@ test('Bilibili page keyboard forwards A/S/D/E with the current binding and consu
       videoId: h.state().video.videoId, session: h.state().video.session, trackId: h.state().trackId }]);
   }
   const before = h.messages.length;
+  assert.equal(h.key('KeyK').defaultPrevented, false);
+  assert.equal(h.key('Space', { repeat: true }).defaultPrevented, true, 'consume repeats without posting another play command');
   for (const extra of [{ isTrusted: false }, { ctrlKey: true }, { repeat: true }, { isComposing: true },
     { target: { closest: selector => selector.includes('textarea') ? {} : null } }]) {
     assert.equal(h.key('KeyE', extra).defaultPrevented, false);
@@ -273,7 +275,24 @@ test('Bilibili previous navigation enters manual and play atomically returns to 
   assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
 });
 
-test('Bilibili shadowing waits the exact 3-second phrase duration and automatically plays the next phrase', async t => {
+for (const mode of ['manual', 'shadowing']) {
+  test(`Bilibili toggle pauses ${mode} once then resumes continuous playback at the same position`, async t => {
+    const h = await harness(t), phrase = h.state().phrases[0];
+    h.send({ type: 'seek', phraseId: phrase.id, playMode: mode }); await sleep(20);
+    h.video.currentTime = phrase.startMs / 1000 + .1;
+    const position = h.video.currentTime;
+    h.send({ type: 'playback-toggle' }); await sleep(20);
+    assert.equal(h.video.paused, true);
+    await sleep(80); assert.equal(h.video.paused, true); assert.equal(h.video.currentTime, position);
+    h.send({ type: 'playback-toggle' }); await sleep(280);
+    assert.equal(h.video.paused, false); assert.equal(h.video.currentTime, position);
+    assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
+    h.video.currentTime = phrase.endMs / 1000 + .1; await sleep(40);
+    assert.equal(h.video.paused, false);
+  });
+}
+
+test('Bilibili shadowing waits the sentence duration then automatically advances', async t => {
   const h = await harness(t), [first, second] = h.state().phrases;
   assert.equal(first.endMs - first.startMs, 3_000); assert.ok(second);
   h.send({ type: 'seek', phraseId: first.id, playMode: 'shadowing' });
@@ -285,13 +304,11 @@ test('Bilibili shadowing waits the exact 3-second phrase duration and automatica
     `shadowing brake drift ${brakeActualMs - first.endMs}ms exceeds ±20ms`);
   assert.equal(h.diagnostics.ylhBrakeMode, 'shadowing');
   assert.equal(h.diagnostics.ylhBrakeTrigger, 'poller');
-  for (let attempt = 0; attempt < 350 && !h.messages.some(message => message.type === 'shadowing-cycle'); attempt++) await sleep(10);
-  const cycle = h.messages.find(message => message.type === 'shadowing-cycle');
-  assert.ok(cycle, JSON.stringify(h.messages.filter(message => message.type === 'playback-state' || message.type === 'shadowing-cycle').slice(-20)));
-  assert.equal(cycle.expectedWaitMs, 3_000);
-  assert.ok(Math.abs(cycle.waitErrorMs) <= 50, `actual wait error ${cycle.waitErrorMs}ms`);
-  assert.equal(cycle.boundaryErrorMs, 0);
+  await sleep(1_500);
+  assert.equal(h.video.currentTime, first.endMs / 1000); assert.equal(h.video.paused, true);
+  await sleep(1_600);
   assert.equal(h.video.currentTime, second.startMs / 1000); assert.equal(h.video.paused, false);
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).shadowingStartMs, second.startMs);
   assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'shadowing');
 });
 
@@ -300,6 +317,44 @@ test('Bilibili playback controls reject a stale subtitle track binding', async t
   h.send({ type: 'playback-rate', rate: 1.5, trackId: 'stale-track' });
   h.send({ type: 'playback-toggle', trackId: 'stale-track' });
   await sleep(30); assert.equal(h.video.playbackRate, 1); assert.equal(h.video.paused, true);
+});
+
+test('Bilibili practice replay stays bounded but ordinary play after recording is continuous', async t => {
+  const h = await harness(t), first = h.state().phrases[0];
+  h.send({ type: 'seek', phraseId: first.id, playMode: 'practice' }); await sleep(20);
+  h.video.currentTime = first.endMs / 1000; await sleep(40);
+  h.send({ type: 'practice-toggle' }); await sleep(30);
+  assert.equal(h.video.currentTime, first.startMs / 1000); assert.equal(h.video.paused, false);
+  h.send({ type: 'practice-pause', requestId: 'pause-recording' }); await sleep(20);
+  assert.equal(h.video.paused, true);
+  assert.ok(h.messages.some(message => message.type === 'practice-response' && message.requestId === 'pause-recording' && !message.error));
+  h.send({ type: 'playback-toggle' }); await sleep(280);
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
+  h.video.currentTime = first.endMs / 1000 + .1; await sleep(40);
+  assert.equal(h.video.paused, false);
+  assert.equal(h.video.currentTime, first.endMs / 1000 + .1);
+});
+
+test('Bilibili unsupported audio capture restores the player and returns a bounded error', async t => {
+  const h = await harness(t), first = h.state().phrases[0];
+  h.send({ type: 'seek', phraseId: first.id, playMode: 'practice' }); await sleep(20);
+  h.video.currentTime = 1.5; h.video.playbackRate = 1.5; h.video.paused = true;
+  h.send({ type: 'practice-capture', phraseId: first.id, requestId: 'capture-unsupported' }); await sleep(40);
+  const response = h.messages.find(message => message.type === 'practice-response' && message.requestId === 'capture-unsupported');
+  assert.match(response?.error, /不支持/); assert.equal(h.video.currentTime, 1.5); assert.equal(h.video.playbackRate, 1.5);
+  assert.equal(h.video.paused, true);
+  h.send({ type: 'practice-pause', requestId: 'stale-practice', trackId: 'old-track' }); await sleep(20);
+  assert.equal(h.messages.some(message => message.requestId === 'stale-practice'), false);
+});
+
+test('Bilibili sentence-only mode neither forwards recording keys nor accepts audio capture', async t => {
+  const h = await harness(t), first = h.state().phrases[0];
+  h.send({ type: 'seek', phraseId: first.id, playMode: 'shadowing' }); await sleep(20);
+  for (const key of ['KeyR', 'KeyH', 'KeyP', 'KeyG', 'BracketLeft']) assert.equal(h.key(key).defaultPrevented, false);
+  const time = h.video.currentTime;
+  h.send({ type: 'practice-capture', phraseId: first.id, requestId: 'not-recording-mode' }); await sleep(20);
+  assert.match(h.messages.find(message => message.requestId === 'not-recording-mode')?.error, /麦克风进入跟读模式/);
+  assert.equal(h.video.currentTime, time); assert.equal(h.video.paused, false);
 });
 
 test('Bilibili does not publish invalid media clock values to the side panel', async t => {

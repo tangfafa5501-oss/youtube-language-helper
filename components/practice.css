@@ -1,0 +1,51 @@
+.practice-card { --practice-reference: oklch(75% .15 180); --practice-recording: oklch(75% .18 45); --practice-reference-amplitude: oklch(65% .12 180); margin: 16px 0 10px; padding: 24px 16px; background: color-mix(in srgb, oklch(92% .08 85) 50%, var(--echo-bg)); color: var(--echo-text); border-radius: 0; }
+:root[data-theme="dark"] .practice-card { background: color-mix(in srgb, var(--echo-highlight) 50%, var(--echo-bg)); }
+@media (prefers-color-scheme: dark) { :root[data-theme="system"] .practice-card { background: color-mix(in srgb, var(--echo-highlight) 50%, var(--echo-bg)); } }
+.practice-card h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 650; line-height: 1.5; }
+.practice-card h3 .ylh-icon { width: 16px; height: 16px; color: #f39916; }
+.practice-card button { font: inherit; cursor: pointer; border: 0; border-radius: 8px; padding: 6px 8px; background: transparent; color: inherit; }
+.practice-card button:disabled { opacity: .45; cursor: default; }
+.practice-card button:focus-visible, .practice-card textarea:focus-visible, .practice-card select:focus-visible { outline: 2px solid #cf7410; outline-offset: 3px; }
+.practice-line { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; }
+.practice-duration { display: flex; align-items: center; gap: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.practice-duration .ylh-icon { color: var(--echo-muted); width: 14px; height: 14px; }
+.practice-help { color: var(--echo-muted); font-size: 12px; line-height: 1.4; margin: 16px 0; }
+.practice-dictation { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid color-mix(in srgb, var(--echo-line) 50%, transparent); }
+.practice-dictation textarea { margin-top: 14px; box-sizing: border-box; width: 100%; min-height: 80px; resize: vertical; border: 2px solid #f9deb9; border-radius: 8px; background: var(--echo-raised); color: var(--echo-text); padding: 10px; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+.practice-card .practice-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: #f29b20; color: #fff; padding: 7px 10px; }
+.practice-primary .ylh-icon { width: 16px; height: 16px; }
+.practice-record-action { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 16px; }
+.practice-card .practice-record { padding: 8px 12px; min-height: 36px; font-size: 14px; line-height: 20px; }
+.practice-card .practice-record.recording { background: #bd3c36; }
+.practice-card .practice-disclosure { width: 100%; display: flex; align-items: center; justify-content: space-between; text-align: left; margin: 20px 0 8px; padding: 8px 0; color: var(--echo-muted); font-size: 12px; }
+.practice-disclosure > span { display: inline-flex; align-items: center; gap: 8px; }
+.practice-disclosure .ylh-icon { width: 14px; height: 14px; }
+.practice-disclosure[aria-expanded="true"] > .ylh-icon { transform: rotate(180deg); }
+.practice-pitch-controls { display: flex; justify-content: flex-end; align-items: center; gap: 6px; height: 24px; margin-bottom: 8px; }
+.practice-pitch-controls button { display: grid; place-items: center; padding: 4px; width: 24px; height: 24px; }
+.practice-pitch-controls button[aria-pressed="false"] { opacity: .3; }
+.practice-source span { display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--practice-reference); }
+.practice-source.recording span { background: var(--practice-recording); }
+.practice-control-divider { width: 1px; height: 16px; margin-inline: 3px; background: var(--echo-line); }
+.practice-amplitude .ylh-icon { width: 16px; height: 16px; }
+.practice-chart { width: 100%; min-width: 0; height: 100px; font-size: 10px; }
+.practice-chart-tooltip { padding: 6px 8px; background: var(--echo-raised); border: 1px solid var(--echo-line); border-radius: 6px; font-size: 11px; }
+.practice-chart-message { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 0; min-height: 100px; color: var(--echo-muted); font-size: 12px; }
+.practice-live { display: flex; gap: 10px; align-items: center; justify-content: center; font-variant-numeric: tabular-nums; margin-top: 15px; font-size: 12px; }
+.practice-live meter { width: 80px; }
+.practice-pulse { width: 10px; height: 10px; background: #bd3c36; border-radius: 50%; animation: practice-pulse 1s infinite; }
+@keyframes practice-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .practice-pulse { animation: none; } }
+.practice-recordings { margin-top: 16px; font-size: 12px; }
+.practice-recordings details { margin-top: 8px; color: var(--echo-muted); }
+.practice-recordings select { width: 100%; min-width: 0; margin: 6px 0; padding: 8px; border: 1px solid var(--echo-line); border-radius: 8px; background: var(--echo-raised); color: var(--echo-text); }
+.practice-recordings audio { width: 100%; height: 32px; }
+.practice-delete { display: block; margin-left: auto; font-size: 12px !important; }
+.practice-error { color: #b9382f; font-size: 12px; }
+.practice-result { margin-top: 15px; line-height: 1.6; font-size: 13px; }.practice-result[data-passed="true"] strong { color: #127b45; }
+.practice-diff { white-space: pre-wrap; overflow-wrap: anywhere; }.practice-diff .missed { color: #aa2424; text-decoration: line-through; background: #fee2e2; }.practice-diff .added { color: #874000; background: #ffedd5; }
+.practice-history { font-size: 12px; margin-top: 14px; }.practice-history summary { cursor: pointer; }.practice-history button { display: block; width: 100%; text-align: left; }
+.echo-cue .dictation-hidden { filter: blur(4px); user-select: none; }.echo-reveal { display: block; margin: 0 18px 8px auto; border: 0; background: transparent; color: var(--echo-muted); cursor: pointer; padding: 5px 8px; font: inherit; font-size: 12px; }
+.echo-segment-controls { display: flex; justify-content: center; gap: 12px; padding: 12px 8px; }
+.echo-segment-controls button { display: inline-flex; align-items: center; gap: 2px; border: 0; background: transparent; color: var(--echo-muted); padding: 6px; cursor: pointer; }
+.echo-segment-controls .ylh-icon { width: 14px; height: 14px; }

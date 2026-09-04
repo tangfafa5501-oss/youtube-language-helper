@@ -48,7 +48,7 @@ async function harness(t) {
     : selector.includes('ytp-subtitles-button') ? subtitleButton : video;
   const location = { href: `https://www.youtube.com/watch?v=${videoId}`, origin: 'https://www.youtube.com' };
   const context = createContext({ console, URL, AbortController, CustomEvent, Event, EventTarget, document: doc, location,
-    TextDecoder, crypto: { randomUUID }, setTimeout, clearTimeout,
+    TextDecoder, crypto: { randomUUID }, performance, setTimeout, clearTimeout,
     setInterval: (...args) => { const id = setInterval(...args); timers.add(id); return id; }, clearInterval,
     chrome: { runtime: { id: 'test-extension', onConnect: connect, onMessage: runtimeMessage,
       getURL: path => `chrome-extension://test-extension${path}`,
@@ -90,8 +90,13 @@ async function harness(t) {
   });
   runInContext(`var window = globalThis; var bus = new EventTarget();
     window.ytcfg = { get: key => key === 'VISITOR_DATA' ? 'synthetic-visitor-data-at-least-twenty-characters' : undefined };
-    window.addEventListener = bus.addEventListener.bind(bus);
-    window.removeEventListener = bus.removeEventListener.bind(bus);
+    var keyListeners = new Map(['keydown', 'keypress', 'keyup', 'blur'].map(type => [type, new Set()]));
+    window.addEventListener = (type, listener, options) => {
+      if (keyListeners.has(type)) keyListeners.get(type).add(listener); else bus.addEventListener(type, listener, options);
+    };
+    window.removeEventListener = (type, listener, options) => {
+      if (keyListeners.has(type)) keyListeners.get(type).delete(listener); else bus.removeEventListener(type, listener, options);
+    };
     var heldInfo = []; var holdInfo = false;
     window.postMessage = data => {
       if (holdInfo && data.direction === 'response' && 'video' in data) { heldInfo.push(data); return; }
@@ -121,7 +126,21 @@ async function harness(t) {
   const load = () => onMessage.emit({ version: 1, type: 'load', trackId: state().trackId, session: state().video.session });
   const seek = (cue, playMode = 'manual') => onMessage.emit({ version: 1, type: 'seek', videoId: state().video.videoId,
     session: state().video.session, trackId: state().trackId, cueId: cue.cueId, playMode });
-  return { state, load, seek, video, messages, nativeMessages, diagnostics: doc.documentElement.dataset, addPanel, disconnect,
+  const keyEvent = (type, code, extra = {}) => {
+    const event = { type, code, isTrusted: true, defaultPrevented: false, stopped: false,
+      preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...extra };
+    for (const listener of context.keyListeners.get(type)) { listener(event); if (event.stopped) break; }
+    return event;
+  };
+  // Existing callers represent a complete physical press, not a permanently held key.
+  const key = (code, extra = {}) => {
+    const down = keyEvent('keydown', code, extra);
+    if (!down.defaultPrevented) keyEvent('keypress', code, extra);
+    keyEvent('keyup', code, { ...extra, repeat: false });
+    return down;
+  };
+  return { state, load, seek, key, keyEvent, video, messages, nativeMessages, diagnostics: doc.documentElement.dataset, addPanel, disconnect,
+    onNativeKeyup: listener => context.keyListeners.get('keyup').add(listener),
     get plays() { return plays; }, get kernelPauses() { return kernelPauses; },
     get fetched() { return fetched; }, get primeClicks() { return primeClicks; }, setNativeAuth: value => { nativeAuthAvailable = value; },
     setNativeFetchNeedsAuth: value => { nativeFetchNeedsAuth = value; },
@@ -413,25 +432,126 @@ test('YouTube previous navigation enters manual and play atomically returns to a
   assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
 });
 
-test('YouTube shadowing pauses exactly, waits the phrase duration, and auto-plays the next phrase', async t => {
+for (const mode of ['auto', 'manual', 'shadowing', 'practice']) {
+  test(`YouTube Space keyup cannot undo the keydown pause in ${mode}`, async t => {
+    const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
+    h.seek(h.state().cues[0], mode); await tick(); await tick();
+    h.video.currentTime = 1.1;
+    let nativeToggles = 0;
+    // Explicitly simulated site release handler: the old keydown-only bridge leaks to it.
+    h.onNativeKeyup(event => {
+      if (event.code === 'Space' && !event.defaultPrevented) {
+        nativeToggles++; if (h.video.paused) void h.video.play(); else h.video.pause();
+      }
+    });
+    const plays = h.plays;
+    assert.equal(h.keyEvent('keydown', 'Space').defaultPrevented, true);
+    await tick(); assert.equal(h.video.paused, true, 'keydown pauses');
+    for (let i = 0; i < 3; i++) {
+      assert.equal(h.keyEvent('keydown', 'Space', { repeat: true }).defaultPrevented, true);
+    }
+    const up = h.keyEvent('keyup', 'Space'); await tick();
+    assert.equal(h.video.paused, true, 'releasing Space must not let the site restart playback');
+    assert.equal(up.defaultPrevented, true); assert.equal(up.stopped, true);
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.equal(h.video.paused, true); assert.equal(h.plays, plays); assert.equal(nativeToggles, 0);
+    assert.equal(h.keyEvent('keydown', 'Space').defaultPrevented, true); await tick();
+    assert.equal(h.video.paused, false, 'a new press plays, without seeking or restoring the old mode');
+    assert.equal(h.keyEvent('keyup', 'Space').stopped, true); await tick();
+    assert.equal(h.video.paused, false); assert.equal(h.plays, plays + 1); assert.equal(nativeToggles, 0);
+    assert.equal(h.video.currentTime, 1.1);
+    assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
+  });
+}
+
+test('YouTube consumes only the paired Space press/release and releases ownership on blur', async t => {
+  const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
+  const editor = { target: { closest: () => ({}) } };
+  for (const extra of [editor, { ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true },
+    { isTrusted: false }, { isComposing: true }]) {
+    assert.equal(h.keyEvent('keydown', 'Space', extra).defaultPrevented, false);
+    assert.equal(h.keyEvent('keypress', 'Space', extra).defaultPrevented, false);
+    assert.equal(h.keyEvent('keyup', 'Space', extra).defaultPrevented, false);
+  }
+  assert.equal(h.keyEvent('keyup', 'Space').defaultPrevented, false, 'unowned release stays native');
+  h.keyEvent('keydown', 'Space'); await tick();
+  assert.equal(h.keyEvent('keypress', 'Space').stopped, true);
+  assert.equal(h.keyEvent('keyup', 'KeyK').stopped, false);
+  assert.equal(h.keyEvent('keyup', 'Space', { isTrusted: false }).stopped, false);
+  assert.equal(h.keyEvent('keydown', 'Space', { repeat: true, ...editor }).stopped, true);
+  assert.equal(h.keyEvent('keyup', 'Space', { shiftKey: true, ...editor }).stopped, true,
+    'the claimed release stays suppressed even if focus or modifiers changed while held');
+  assert.equal(h.keyEvent('keyup', 'Space').stopped, false);
+  h.keyEvent('keydown', 'Space'); await tick();
+  h.keyEvent('blur');
+  assert.equal(h.keyEvent('keyup', 'Space').stopped, false, 'blur cannot leave a stuck held-key flag');
+  const before = h.video.paused;
+  h.keyEvent('keydown', 'Space'); await tick(); assert.equal(h.video.paused, !before);
+  h.disconnect();
+  assert.equal(h.keyEvent('keyup', 'Space').stopped, true, 'finish an already consumed press after disconnect');
+  assert.equal(h.key('Space').defaultPrevented, false, 'future presses belong to the site after disconnect');
+});
+
+for (const mode of ['manual', 'shadowing']) {
+  test(`YouTube page Space pauses ${mode} once then resumes auto; K and editors are untouched`, async t => {
+    const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
+    const first = h.state().cues[0];
+    h.seek(first, mode); await tick(); await tick();
+    h.video.currentTime = 1.1;
+    for (const extra of [{ isTrusted: false }, { ctrlKey: true }, { isComposing: true },
+      { target: { closest: () => ({}) } }]) assert.equal(h.key('Space', extra).defaultPrevented, false);
+    assert.equal(h.key('KeyK').defaultPrevented, false);
+    assert.equal(h.key('Space', { repeat: true }).defaultPrevented, true, 'consume repeats without toggling');
+    assert.equal(h.video.paused, false);
+    const pause = h.key('Space'); await tick();
+    assert.equal(pause.defaultPrevented, true); assert.equal(pause.stopped, true);
+    assert.equal(h.video.paused, true);
+    const plays = h.plays;
+    await new Promise(resolve => setTimeout(resolve, 80));
+    assert.equal(h.plays, plays); assert.equal(h.video.currentTime, 1.1);
+    assert.equal(h.key('Space').defaultPrevented, true);
+    await new Promise(resolve => setTimeout(resolve, 280));
+    assert.equal(h.video.paused, false); assert.equal(h.plays, plays + 1);
+    assert.equal(h.video.currentTime, 1.1);
+    assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
+    h.video.currentTime = first.endMs / 1000 + .1;
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(h.video.paused, false);
+    h.disconnect();
+    assert.equal(h.key('Space').defaultPrevented, false, 'disconnected extension must leave native Space alone');
+  });
+}
+
+for (const type of ['playback-toggle', 'playback-mode']) {
+  test(`YouTube ${type} cancels a shadowing seek still awaiting page metadata`, async t => {
+    const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
+    h.video.currentTime = 1.2;
+    h.holdInfo(); h.seek(h.state().cues[0], 'shadowing'); await tick();
+    assert.ok(h.heldInfoCount() > 0);
+    h.send({ version: 1, type, mode: 'auto', videoId: h.state().video.videoId, session: h.state().video.session });
+    await tick(); h.releaseInfo(); await tick(); await tick();
+    assert.equal(h.video.currentTime, 1.2, 'late seek must not rewind after a newer play or mode request');
+    await new Promise(resolve => setTimeout(resolve, 280));
+    assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'auto');
+  });
+}
+
+test('YouTube shadowing waits the sentence duration then automatically advances', async t => {
   const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
   const [first, second] = h.state().cues;
   h.seek(first, 'shadowing'); await tick(); await tick();
-  h.video.currentTime = first.endMs / 1000 - .250;
+  h.video.currentTime = first.endMs / 1000 - .025;
   await new Promise(resolve => setTimeout(resolve, 50));
   const brakeActualMs = Number(h.diagnostics.ylhBrakeActualMs);
   assert.equal(h.diagnostics.ylhBrakeMode, 'shadowing');
   assert.equal(h.diagnostics.ylhBrakeTrigger, 'poller');
   assert.ok(Math.abs(brakeActualMs - first.endMs) <= 20,
     `shadowing brake drift ${brakeActualMs - first.endMs}ms exceeds ±20ms`);
-  for (let attempt = 0; attempt < 100 && !h.messages.some(message => message.type === 'shadowing-cycle'); attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  const cycle = h.messages.find(message => message.type === 'shadowing-cycle');
-  assert.ok(cycle); assert.equal(cycle.expectedWaitMs, first.endMs - first.startMs);
-  assert.ok(Math.abs(cycle.waitErrorMs) <= 50, `actual wait error ${cycle.waitErrorMs}ms`);
-  assert.equal(cycle.boundaryErrorMs, 0);
+  await new Promise(resolve => setTimeout(resolve, (first.endMs - first.startMs) / 2));
+  assert.equal(h.video.currentTime, first.endMs / 1000); assert.equal(h.video.paused, true);
+  await new Promise(resolve => setTimeout(resolve, (first.endMs - first.startMs) / 2 + 80));
   assert.equal(h.video.currentTime, second.startMs / 1000); assert.equal(h.video.paused, false);
+  assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).shadowingStartMs, second.startMs);
   assert.equal(h.messages.filter(message => message.type === 'playback-state').at(-1).playMode, 'shadowing');
 });
 
@@ -465,6 +585,29 @@ test('YouTube clamps a manual sentence end to media duration', async t => {
   await new Promise(resolve => setTimeout(resolve, 120));
   assert.equal(h.video.paused, true);
   assert.equal(h.video.currentTime, 1.2);
+});
+
+test('YouTube practice button replays its current phrase and page R/H reach the panel', async t => {
+  const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
+  const first = h.state().cues[0]; h.seek(first, 'practice'); await tick(); await tick();
+  h.video.currentTime = first.endMs / 1000; await new Promise(resolve => setTimeout(resolve, 40));
+  h.send({ version: 1, type: 'practice-toggle', videoId: h.state().video.videoId, session: h.state().video.session });
+  await tick(); await tick(); assert.equal(h.video.currentTime, first.startMs / 1000); assert.equal(h.video.paused, false);
+  for (const [key, action] of [['KeyR', 'record'], ['KeyH', 'dictation']]) {
+    assert.equal(h.key(key).defaultPrevented, true);
+    assert.ok(h.messages.some(message => message.type === 'player-shortcut' && message.action === action));
+  }
+});
+
+test('YouTube sentence-only mode neither forwards recording keys nor accepts audio capture', async t => {
+  const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
+  const first = h.state().cues[0]; h.seek(first, 'shadowing'); await tick(); await tick();
+  for (const key of ['KeyR', 'KeyH', 'KeyP', 'KeyG', 'BracketLeft']) assert.equal(h.key(key).defaultPrevented, false);
+  const time = h.video.currentTime;
+  h.send({ version: 1, type: 'practice-capture', phraseId: first.cueId, requestId: 'not-recording-mode',
+    videoId: h.state().video.videoId, session: h.state().video.session }); await tick();
+  assert.match(h.messages.find(message => message.requestId === 'not-recording-mode')?.error, /麦克风进入跟读模式/);
+  assert.equal(h.video.currentTime, time); assert.equal(h.video.paused, false);
 });
 
 test('switching from manual waiting to auto resumes immediately', async t => {
