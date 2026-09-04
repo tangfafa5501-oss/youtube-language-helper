@@ -8,6 +8,8 @@ import * as Slider from '@radix-ui/react-slider';
 import { BookOpen, Check, ChevronDown, CircleHelp, Keyboard, Languages, Mic, MoreVertical,
   ArrowUp, ArrowDown, Minus, Plus, Pause, Play, RefreshCw, Settings, SkipBack, SkipForward, X } from '../../components/icons';
 import { SettingsView } from '../../components/settings-view';
+import { HoverHint } from '../../components/hover-hint';
+import { useCueFollow } from '../../components/use-cue-follow';
 import { adjacentPlaybackRate, PLAYBACK_RATES, PORT, emptyState, type PlayMode, type State, type Track } from '../../lib/protocol';
 import { connectPanel } from '../../lib/panel-connection';
 import { record } from '../../lib/captions';
@@ -54,7 +56,7 @@ type EchoRow = { id: string; text: string; secondaryText: string; startMs: numbe
 const SHORTCUT_SECTIONS = [
   { title: '通用控制', items: [
     ['?', '显示键盘快捷键'], ['Space', '暂停/继续（继续时自动播放）'], ['Shift + < / >', '减速/加速'],
-    ['E', '切换逐句跟读'], ['A', '上一句'], ['S', '重播当前句'], ['D', '下一句'],
+    ['E', '切换逐句跟读'], ['F', '切换麦克风跟读模式'], ['A', '上一句'], ['S', '重播当前句'], ['D', '下一句'],
   ] },
   { title: '跟读模式控制', items: [
     ['R', '开始/停止录音'], ['G', '播放录音'], ['Esc', '取消录音'],
@@ -70,7 +72,7 @@ const GUIDE_STEPS = [
   ['选择语段', '点击任一语段即可定位。A、S、D 分别对应上一句、重播和下一句。'],
   ['逐句跟读', '按 E 或逐句跟读按钮开启。每句播完停顿本句同等时长，再自动播放下一句，循环往下；按播放或空格恢复普通连续播放。'],
   ['播放速度', '点击底部倍速按钮打开滑块；Shift 加逗号或句号也可减速、加速。'],
-  ['录音与听写', '点击右侧麦克风单独开启跟读模式，再按 R 录音、H 听写。此模式与逐句跟读的等时停顿独立；展开音高曲线时采集原声，停止录音后可比较语调并回放历史。'],
+  ['录音与听写', '点击右侧麦克风或按 F 单独开启跟读模式，片段播完暂停，按 S 重播，再按 R 录音、H 听写。此模式与 E 逐句等时停顿独立；展开音高曲线可比较原声和录音的语调。'],
 ] as const;
 
 function TrackSelect({ label, value, disabled, placeholder, tracks, isBilibili, onChange }: { label: string; value: string;
@@ -105,7 +107,7 @@ function ShortcutDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
     <Dialog.Overlay className="echo-dialog-overlay"/>
     <Dialog.Content className="echo-dialog-content echo-shortcut-card" aria-describedby="shortcut-description">
       <div className="echo-dialog-header"><Dialog.Title>键盘快捷键</Dialog.Title><Dialog.Close aria-label="关闭"><X/></Dialog.Close></div>
-      <Dialog.Description id="shortcut-description">Space 暂停/恢复自动播放；跟读模式的播放按钮在句尾重播当前片段。输入框或弹窗内保留原有键盘操作。</Dialog.Description>
+      <Dialog.Description id="shortcut-description">Space 暂停/恢复自动播放；F 开关麦克风跟读，S 重播当前片段。输入框或弹窗内保留原有键盘操作。扩展连接时 F 用于跟读，不再触发网站全屏。</Dialog.Description>
       {SHORTCUT_SECTIONS.map(section => <section className="echo-shortcut-section" key={section.title}><h2>{section.title}</h2><dl>
         {section.items.map(([keys, description]) => <div key={`${keys}-${description}`}><dt>{keys.split(' / ').map((key, index) => <React.Fragment key={key}>{index ? ' / ' : ''}<kbd>{key}</kbd></React.Fragment>)}</dt><dd>{description}</dd></div>)}
       </dl></section>)}
@@ -285,13 +287,8 @@ function App() {
     endMs: echoRows[endIndex]!.endMs!, text: echoRows.slice(navigationIndex, endIndex + 1).map(row => row.text).join(' '),
   } : null;
 
-  useEffect(() => {
-    if (!activeId) return;
-    const element = document.querySelector<HTMLElement>(`.echo-cue[data-phrase-id="${CSS.escape(activeId)}"]`);
-    if (!element) return;
-    const bounds = element.getBoundingClientRect();
-    if (bounds.top < 58 || bounds.bottom > innerHeight - 58) element.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-  }, [activeId]);
+  useCueFollow(view === 'reader' && state.status === 'loaded' && activeId
+    ? `${video?.session}:${state.trackId}:${playMode}:${activeId}:${endIndex}:${dictation}` : '');
 
   const activateEchoRow = (index: number, intent: 'select' | 'previous' | 'next' | 'replay' | 'shadowing' | 'practice' = 'select', rangeEnd?: number) => {
     const item = echoRows[index]; if (!item || item.startMs === null || item.endMs === null || item.endMs <= item.startMs) return;
@@ -380,6 +377,7 @@ function App() {
     else if (action === 'replay' && navigationIndex >= 0) activateEchoRow(navigationIndex, 'replay');
     else if (action === 'next' && nextIndex >= 0) activateEchoRow(nextIndex, 'next');
     else if (action === 'shadowing') toggleShadowing();
+    else if (action === 'practice') togglePracticeMode();
     else if (action === 'dictation' && playMode === 'practice') toggleDictation();
     else if (action === 'expand-start') resizePractice('start', -1);
     else if (action === 'contract-start') resizePractice('start', 1);
@@ -479,7 +477,11 @@ function App() {
         </Popover.Content></Popover.Portal>
       </Popover.Root>
       {playMode === 'practice' && <button className={`practice-mode ${dictation ? 'active' : ''}`} aria-label="听写模式" aria-pressed={dictation} title="听写模式 (H)" onClick={toggleDictation}><BookOpen/></button>}
-      <button className={`practice-mode ${playMode === 'practice' ? 'active' : ''}`} data-play-mode-control="practice" aria-label="跟读模式" aria-pressed={playMode === 'practice'} title="跟读模式：录音与听写" onClick={togglePracticeMode}><Mic/></button>
+      <HoverHint align="end" content={playMode === 'practice'
+        ? '跟读模式已开启—片段播放一次后暂停，按 S 重播；F 关闭。'
+        : '开启跟读模式—片段播放一次后暂停，可录音与听写 (F)。'}>
+        <button className={`practice-mode ${playMode === 'practice' ? 'active' : ''}`} data-play-mode-control="practice" aria-label="跟读模式" aria-keyshortcuts="F" aria-pressed={playMode === 'practice'} onClick={togglePracticeMode}><Mic/></button>
+      </HoverHint>
     </footer>
     <ShortcutDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}/><GuideDialog open={guideOpen} onOpenChange={setGuideOpen}/>
   </main>;

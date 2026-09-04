@@ -22,14 +22,18 @@ export async function captureVideoAudio(video: HTMLVideoElement, endMs: number, 
       const abort = () => finish(new Error('原声采集已取消'));
       const poll = setInterval(() => {
         if (signal.aborted) abort();
-        else if (video.currentTime * 1000 >= endMs || video.ended) finish();
+        // A user's seek changes currentTime before its queued seeking event.
+        // Do not let that jump masquerade as reaching the end by playback.
+        else if (!video.seeking && (video.currentTime * 1000 >= endMs || video.ended)) finish();
       }, 20);
       const timeout = setTimeout(() => finish(new Error('原声采集超时，请等待视频缓冲后重试')), 90_000);
       recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
       recorder.onerror = () => finish(new Error('浏览器无法录制此视频的音频'));
       recorder.onstop = () => {
         const blob = new Blob(chunks, { type: recorder.mimeType || mimeType });
-        if (error) reject(error); else if (!blob.size) reject(new Error('未采集到原声数据')); else resolve(blob);
+        // stop/dataavailable are asynchronous; cancellation still wins after finish().
+        if (signal.aborted) reject(new Error('原声采集已取消'));
+        else if (error) reject(error); else if (!blob.size) reject(new Error('未采集到原声数据')); else resolve(blob);
       };
       signal.addEventListener('abort', abort, { once: true });
       try { recorder.start(); if (signal.aborted) abort(); else void video.play().catch(() => finish(new Error('请点击播放后重试原声采集'))); }

@@ -1,6 +1,6 @@
 import { PLAYER_SHORTCUTS } from './protocol.ts';
 
-export const SHORTCUT_ACTIONS = ['play', 'previous', 'replay', 'next', 'shadowing', 'slower', 'faster', 'help', 'reserved',
+export const SHORTCUT_ACTIONS = ['play', 'previous', 'replay', 'next', 'shadowing', 'practice', 'slower', 'faster', 'help', 'reserved',
   'dictation', 'record', 'play-recording', 'cancel-recording', 'pitch', 'dictation-focus',
   'expand-start', 'expand-end', 'contract-start', 'contract-end'] as const;
 export type ShortcutAction = typeof SHORTCUT_ACTIONS[number];
@@ -32,6 +32,7 @@ export function shortcutAction(event: KeyInput, captureSpaceRepeat = false): Sho
     case PLAYER_SHORTCUTS.replay: return 'replay';
     case PLAYER_SHORTCUTS.next: return 'next';
     case PLAYER_SHORTCUTS.toggleEcho: return 'shadowing';
+    case PLAYER_SHORTCUTS.togglePractice: return 'practice';
     case PLAYER_SHORTCUTS.toggleDictation: return 'dictation';
     case PLAYER_SHORTCUTS.record: return 'record';
     case PLAYER_SHORTCUTS.playRecording: return 'play-recording';

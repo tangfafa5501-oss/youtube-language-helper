@@ -45,6 +45,7 @@ export const RefreshCw = () => <AssetIcon name="refresh-cw"/>;
 export const RotateCcw = () => <AssetIcon name="rotate-ccw"/>;
 export const Sparkles = () => <AssetIcon name="sparkles"/>;
 export const X = () => <AssetIcon name="x"/>;
+export const Trash = () => <AssetIcon name="trash-2"/>;
 export const Clock = () => <AssetIcon name="clock"/>;
 export const AudioLines = () => <AssetIcon name="audio-lines"/>;
 export const Activity = () => <AssetIcon name="activity"/>;

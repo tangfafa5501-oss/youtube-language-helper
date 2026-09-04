@@ -30,6 +30,7 @@ export const PLAYER_SHORTCUTS = {
   replay: 'KeyS',
   next: 'KeyD',
   toggleEcho: 'KeyE',
+  togglePractice: 'KeyF',
   toggleDictation: 'KeyH',
   record: 'KeyR',
   playRecording: 'KeyG',

@@ -17,7 +17,11 @@
 .practice-record-action { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 16px; }
 .practice-card .practice-record { padding: 8px 12px; min-height: 36px; font-size: 14px; line-height: 20px; }
 .practice-card .practice-record.recording { background: #bd3c36; }
-.practice-card .practice-disclosure { width: 100%; display: flex; align-items: center; justify-content: space-between; text-align: left; margin: 20px 0 8px; padding: 8px 0; color: var(--echo-muted); font-size: 12px; }
+.practice-pitch-heading { position: relative; display: flex; align-items: center; margin: 20px 0 8px; }
+.practice-card .practice-disclosure { width: 100%; display: flex; align-items: center; justify-content: space-between; text-align: left; margin: 0; padding: 8px 0; color: var(--echo-muted); font-size: 12px; }
+.practice-pitch-heading > .ylh-hint-anchor { position: absolute; left: 78px; }
+.practice-card .practice-chart-help { display: grid; place-items: center; padding: 4px; color: var(--echo-text); }
+.practice-chart-help .ylh-icon { width: 14px; height: 14px; }
 .practice-disclosure > span { display: inline-flex; align-items: center; gap: 8px; }
 .practice-disclosure .ylh-icon { width: 14px; height: 14px; }
 .practice-disclosure[aria-expanded="true"] > .ylh-icon { transform: rotate(180deg); }
@@ -37,10 +41,27 @@
 @keyframes practice-pulse { 50% { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .practice-pulse { animation: none; } }
 .practice-recordings { margin-top: 16px; font-size: 12px; }
-.practice-recordings details { margin-top: 8px; color: var(--echo-muted); }
-.practice-recordings select { width: 100%; min-width: 0; margin: 6px 0; padding: 8px; border: 1px solid var(--echo-line); border-radius: 8px; background: var(--echo-raised); color: var(--echo-text); }
-.practice-recordings audio { width: 100%; height: 32px; }
-.practice-delete { display: block; margin-left: auto; font-size: 12px !important; }
+.practice-recordings audio { display: none; }
+.practice-playback-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.practice-card .practice-playback-toggle { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 7px; border-radius: 50%; background: #191919; color: #fff; }
+.practice-playback-toggle .ylh-icon { width: 18px; height: 18px; }
+.practice-playback-progress { flex: 1; width: 0; min-width: 24px; margin: 0; appearance: none; height: 6px; border-radius: 8px; background: var(--echo-raised); cursor: pointer; }
+.practice-playback-progress::-webkit-slider-thumb { appearance: none; width: 16px; height: 16px; border-radius: 50%; border: 1px solid #252525; background: #fff; box-shadow: 0 1px 2px #0002; }
+.practice-playback-progress::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; border: 1px solid #252525; background: #fff; }
+.practice-playback-progress:focus-visible { outline: 2px solid #cf7410; outline-offset: 3px; }
+.practice-playback-time { white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--echo-muted); }
+.practice-card .practice-recordings-trigger { display: grid; place-items: center; padding: 4px; flex: 0 0 24px; }
+.practice-recordings-trigger .ylh-icon { width: 16px; height: 20px; }
+.practice-recordings-menu { z-index: 110; width: min(250px, calc(100vw - 32px)); max-height: min(280px, var(--radix-popover-content-available-height)); overflow-y: auto; padding: 4px; border: 1px solid var(--echo-line); border-radius: 10px; background: var(--echo-raised); color: var(--echo-text); box-shadow: 0 4px 12px #0002; }
+.practice-recording-item { display: flex; align-items: center; border-radius: 6px; }
+.practice-recording-item[data-selected="true"] { background: color-mix(in srgb, var(--echo-muted) 10%, var(--echo-raised)); }
+.practice-recordings-menu button { border: 0; color: inherit; background: transparent; cursor: pointer; font: inherit; font-size: 12px; border-radius: 6px; }
+.practice-recordings-menu button:focus-visible { outline: 2px solid #cf7410; outline-offset: -2px; }
+.practice-recording-choice { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: 1; padding: 12px 8px; min-width: 0; text-align: left; }
+.practice-recording-choice > span:last-child { color: var(--echo-muted); font-variant-numeric: tabular-nums; }
+.practice-recording-delete { display: grid; place-items: center; padding: 8px; }
+.practice-recording-delete .ylh-icon { width: 14px; height: 14px; }
+.practice-pitch-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; color: var(--echo-muted); font-size: 12px; margin: 8px 0; }
 .practice-error { color: #b9382f; font-size: 12px; }
 .practice-result { margin-top: 15px; line-height: 1.6; font-size: 13px; }.practice-result[data-passed="true"] strong { color: #127b45; }
 .practice-diff { white-space: pre-wrap; overflow-wrap: anywhere; }.practice-diff .missed { color: #aa2424; text-decoration: line-through; background: #fee2e2; }.practice-diff .added { color: #874000; background: #ffedd5; }

@@ -33,6 +33,18 @@ test('YIN recovers a known sine frequency and leaves silence unvoiced', () => {
   assert.equal(pitchChartData(contour, null).length, 100);
   assert.equal(pitchChartData(null, null).every(point => point.reference === null), true);
 });
+
+test('quiet low voices retain pitch at browser 44.1/48kHz rates without changing volume', () => {
+  for (const rate of [16_000, 44_100, 48_000]) for (const hz of [80, 150, 220]) {
+    const samples = Float32Array.from({ length: rate }, (_, i) => .03 * Math.sin(2 * Math.PI * hz * i / rate));
+    const original = samples.slice(), contour = extractPitch(samples, rate);
+    const voiced = contour.points.filter(point => point.hz !== null);
+    assert.ok(voiced.length >= 20, `${rate}Hz / ${hz}Hz quiet voice must not disappear`);
+    assert.ok(voiced.every(point => Math.abs(point.hz! - hz) < 2));
+    assert.deepEqual(samples, original, 'analysis must not change the source audio');
+    assert.ok(contour.points.every(point => point.amplitude <= 1));
+  }
+});
 test('practice RPC rejects stale binding replies and cancels an in-flight capture', async () => {
   const sent: Record<string, unknown>[] = [], client = createPracticeClient(message => sent.push(message as Record<string, unknown>));
   const abort = new AbortController();

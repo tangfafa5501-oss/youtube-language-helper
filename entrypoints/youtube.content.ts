@@ -419,7 +419,11 @@ export default defineContentScript({
       }
     }
     let ownsSpacePress = false;
+    let ownsPracticePress = false;
     ctx.addEventListener(window, 'keydown', event => {
+      if (event.isTrusted && event.code === 'KeyF' && ownsPracticePress) {
+        event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
       if (event.isTrusted && event.code === 'Space' && ownsSpacePress) {
         event.preventDefault(); event.stopImmediatePropagation(); return;
       }
@@ -430,6 +434,7 @@ export default defineContentScript({
         'expand-start', 'expand-end', 'contract-start', 'contract-end'].includes(action) && playback.mode !== 'practice') return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (event.code === 'Space') ownsSpacePress = true;
+      if (event.code === 'KeyF') ownsPracticePress = true;
       if (event.repeat) return;
       if (action === 'play') void playbackControl({ type: 'playback-toggle', videoId: binding.videoId,
         session: binding.session, trackId: state.trackId }, owner);
@@ -444,6 +449,13 @@ export default defineContentScript({
       event.preventDefault(); event.stopImmediatePropagation();
     }, { capture: true });
     ctx.addEventListener(window, 'blur', () => { ownsSpacePress = false; });
+    // Consume the whole F gesture: holding/releasing must not also toggle site fullscreen.
+    for (const type of ['keypress', 'keyup'] as const) ctx.addEventListener(window, type, event => {
+      if (!event.isTrusted || event.code !== 'KeyF' || !ownsPracticePress) return;
+      if (type === 'keyup') ownsPracticePress = false;
+      event.preventDefault(); event.stopImmediatePropagation();
+    }, { capture: true });
+    ctx.addEventListener(window, 'blur', () => { ownsPracticePress = false; });
     browser.runtime.onConnect.addListener(port => {
       if (port.name !== PORT || port.sender?.id !== browser.runtime.id || port.sender?.url !== browser.runtime.getURL('/sidepanel.html')) return;
       clients.add(port); port.postMessage(state); void refresh();

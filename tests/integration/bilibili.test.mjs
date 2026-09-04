@@ -118,13 +118,14 @@ async function harness(t, { withMain = false, separateTracks = false, delayEngli
   const send = message => onMessage.emit({ version: 1, videoId: state().video.videoId, session: state().video.session,
     trackId: state().trackId, ...message });
   const sendRaw = message => onMessage.emit(message);
-  const key = (code, extra = {}) => {
+  const keyEvent = (type, code, extra = {}) => {
     const event = { code, isTrusted: true, defaultPrevented: false, stopped: false,
       preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...extra };
-    for (const listener of context.windowListeners.get('keydown') ?? []) listener(event);
+    for (const listener of context.windowListeners.get(type) ?? []) { listener(event); if (event.stopped) break; }
     return event;
   };
-  return { state, send, sendRaw, key, video, messages, requests, backgroundRequests, pageRequests, headerRules, location, diagnostics: document.documentElement.dataset,
+  const key = (code, extra = {}) => { const down = keyEvent('keydown', code, extra); keyEvent('keyup', code, { ...extra, repeat: false }); return down; };
+  return { state, send, sendRaw, key, keyEvent, video, messages, requests, backgroundRequests, pageRequests, headerRules, location, diagnostics: document.documentElement.dataset,
     disconnect: port.disconnect };
 }
 
@@ -144,9 +145,9 @@ test('production Bilibili bridge automatically fetches an AI track when no manua
   assert.equal(h.messages.some(message => message.source === 'bilibili-ocr' || message.ocr), false);
 });
 
-test('Bilibili page keyboard forwards A/S/D/E/Space with the current binding and consumes each event once', async t => {
+test('Bilibili page keyboard forwards A/S/D/E/F/Space with the current binding and consumes each event once', async t => {
   const h = await harness(t, { withMain: true, aiOnly: true });
-  for (const [code, action] of [['KeyA', 'previous'], ['KeyS', 'replay'], ['KeyD', 'next'], ['KeyE', 'shadowing'], ['Space', 'play']]) {
+  for (const [code, action] of [['KeyA', 'previous'], ['KeyS', 'replay'], ['KeyD', 'next'], ['KeyE', 'shadowing'], ['KeyF', 'practice'], ['Space', 'play']]) {
     const before = h.messages.length;
     const event = h.key(code);
     assert.equal(event.defaultPrevented, true); assert.equal(event.stopped, true);
@@ -163,6 +164,23 @@ test('Bilibili page keyboard forwards A/S/D/E/Space with the current binding and
   assert.equal(h.messages.length, before);
   h.disconnect();
   assert.equal(h.key('KeyE').defaultPrevented, false);
+});
+
+test('Bilibili owns F down/repeat/up exactly once and releases ownership after blur', async t => {
+  const h = await harness(t, { aiOnly: true });
+  const count = () => h.messages.filter(m => m.type === 'bilibili-shortcut' && m.action === 'practice').length;
+  assert.equal(h.keyEvent('keydown', 'KeyF').stopped, true);
+  assert.equal(h.keyEvent('keydown', 'KeyF', { repeat: true }).stopped, true);
+  assert.equal(h.keyEvent('keypress', 'KeyF').stopped, true);
+  assert.equal(h.keyEvent('keyup', 'KeyF').stopped, true); assert.equal(count(), 1);
+  assert.equal(h.keyEvent('keyup', 'KeyF').stopped, false);
+  h.key('KeyF'); assert.equal(count(), 2);
+  h.keyEvent('keydown', 'KeyF'); h.keyEvent('blur', '');
+  assert.equal(h.keyEvent('keyup', 'KeyF').stopped, false);
+  const before = count();
+  for (const extra of [{ isTrusted: false }, { ctrlKey: true }, { repeat: true }, { target: { closest: () => ({}) } }])
+    assert.equal(h.key('KeyF', extra).stopped, false);
+  h.disconnect(); assert.equal(h.key('KeyF').stopped, false); assert.equal(count(), before);
 });
 
 test('Bilibili page keyboard ignores stale video bindings during SPA navigation', async t => {

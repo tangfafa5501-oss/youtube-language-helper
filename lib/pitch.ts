@@ -3,14 +3,18 @@ import { YIN } from 'pitchfinder';
 export type PitchPoint = { time: number; hz: number | null; amplitude: number };
 export type PitchContour = { points: PitchPoint[]; duration: number; min: number; max: number };
 export function extractPitch(samples: Float32Array, sampleRate: number): PitchContour {
-  const frameSize = 2048, hopSize = 512;
+  const frameSize = 2 ** Math.ceil(Math.log2(sampleRate * .128)), hopSize = Math.max(1, Math.round(sampleRate * .032));
   const detect = YIN({ sampleRate, threshold: 0.1 });
+  const analysisFrame = new Float32Array(frameSize);
   const points: PitchPoint[] = []; let min = Infinity, max = 0, peak = 0;
   for (let offset = 0; offset + frameSize <= samples.length; offset += hopSize) {
     const frame = samples.subarray(offset, offset + frameSize);
     let power = 0; for (const sample of frame) power += sample * sample;
     const rms = Math.sqrt(power / frame.length);
-    const pitch = rms >= 0.01 ? detect(frame) : null;
+    // Keep the original RMS for volume, but normalize detector input so quiet
+    // low voices do not produce YIN's spurious near-zero-lag/high-frequency hit.
+    if (rms >= .01) for (let i = 0; i < frame.length; i++) analysisFrame[i] = frame[i]! / rms;
+    const pitch = rms >= 0.01 ? detect(analysisFrame) : null;
     const hz = pitch !== null && pitch >= 50 && pitch <= 500 ? pitch : null;
     if (hz !== null) { min = Math.min(min, hz); max = Math.max(max, hz); }
     peak = Math.max(peak, rms); points.push({ time: offset / sampleRate, hz, amplitude: rms });
@@ -19,7 +23,8 @@ export function extractPitch(samples: Float32Array, sampleRate: number): PitchCo
   return { points, duration: samples.length / sampleRate, min: Number.isFinite(min) ? min : 0, max };
 }
 export async function pitchFromBlob(blob: Blob) {
-  const context = new AudioContext();
+  // Let the browser resample for analysis; the recorded/playback audio is untouched.
+  const context = new AudioContext({ sampleRate: 16_000 });
   try { const buffer = await context.decodeAudioData(await blob.arrayBuffer()); return extractPitch(buffer.getChannelData(0), buffer.sampleRate); }
   finally { await context.close(); }
 }

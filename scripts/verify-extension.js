@@ -22,6 +22,7 @@ const report = { startedAt: new Date().toISOString(), head: execFileSync('git', 
   browserPath: 'Browser plugin not available; project Playwright', realNetworkApi: false, dailyBrowserTouched: false,
   microphoneSource: 'Chromium fake device in disposable test profile; no physical microphone',
   spaceKeyupModel: 'simulated YouTube page keyup toggle; real Chromium keyboard down/repeat/up events',
+  pitchSource: 'generated variable-frequency/volume WAV with real silence; native playback and real browser audio analysis',
   checks: [], errors: [], warnings: [], runtimeHashes: [], requests: [], screenshots: [] };
 // A failed standalone verify must not leave an older success looking current.
 await rename(join(artifacts, 'verification_latest.png'), join(evidence, 'previous-standalone-verification.png'))
@@ -61,7 +62,13 @@ const wav = Buffer.alloc(44 + 16_000 * 18 * 2);
 wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16);
 wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(16_000, 24); wav.writeUInt32LE(32_000, 28);
 wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
-for (let i = 0; i < 16_000 * 18; i++) wav.writeInt16LE(Math.round(500 * Math.sin(2 * Math.PI * 220 * i / 16_000)), 44 + i * 2);
+let tonePhase = 0;
+for (let i = 0; i < 16_000 * 18; i++) {
+  const time = i / 16_000, silence = time % 1.5 > 1.05;
+  tonePhase += 2 * Math.PI * (180 + 65 * Math.sin(time * 3)) / 16_000;
+  const volume = silence ? 0 : 6000 * (.35 + .65 * Math.sin(time * 2) ** 2);
+  wav.writeInt16LE(Math.round(volume * Math.sin(tonePhase)), 44 + i * 2);
+}
 const media = `data:audio/wav;base64,${wav.toString('base64')}`;
 const rows = [
   { from: 0, to: 3, content: 'Hello, lovely students, and welcome to your pronunciation training session.' },
@@ -77,8 +84,13 @@ const fixture = url => url.includes('/api/timedtext') ? { events: rows.map(row =
     img_url: 'https://i0.hdslb.com/7cd084941338484aae1ad9425b84077c.png', sub_url: 'https://i0.hdslb.com/4932caff0ff746eab6f01bf08b70ac45.png' } } }
   : url.includes('/x/player/wbi/v2') ? { code: 0, data: { subtitle: { subtitles: [track] } } }
   : url.includes('/doctor-fixture.json') ? { body: rows } : null;
-const testHtml = platform => `<!doctype html><html><head><title>${platform} doctor simulated fixture</title><link rel="icon" href="data:,"></head><body>
+const testHtml = platform => `<!doctype html><html><head><meta charset="utf-8"><title>${platform} doctor simulated fixture</title><link rel="icon" href="data:,"></head><body>
   <h1>Independent extension test — simulated captions and media</h1><div data-cid="2"></div>
+  <input aria-label="视频页面测试输入框"><script>
+  window.__nativeFEvents=0;
+  for(const type of ['keydown','keypress','keyup']) document.addEventListener(type,event=>{
+    if(event.code==='KeyF'&&!event.defaultPrevented&&event.target.tagName!=='INPUT')window.__nativeFEvents++;
+  });</script>
   <div id="movie_player" class="bpx-player-video-wrap" tabindex="0"><video class="html5-main-video" controls preload="auto" src="${media}"></video>
   <button class="ytp-subtitles-button" aria-pressed="true">CC</button></div>
   ${platform === 'youtube' ? `<script>window.ytInitialPlayerResponse={videoDetails:{videoId:'abcdefghijk',title:'Doctor simulated fixture'},playabilityStatus:{status:'OK'},captions:{playerCaptionsTracklistRenderer:{captionTracks:[{baseUrl:'https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en',vssId:'.en',languageCode:'en',name:{simpleText:'English'}}]}}};
@@ -120,6 +132,32 @@ async function captureRuntimeHashes(extensionId) {
     }
     off(); await cdp.send('Debugger.disable', {}, session); await cdp.send('Target.detachFromTarget', { sessionId: session });
   }
+}
+async function assertTopFollow(name) {
+  await panel.waitForFunction(() => {
+    const selected = [...document.querySelectorAll('.echo-cue.selected')];
+    if (!selected.length) return false;
+    const top = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
+    const previous = selected[0].closest('li').previousElementSibling;
+    return Math.abs(selected[0].getBoundingClientRect().top - top - 32) <= 3
+      && (!previous || previous.getBoundingClientRect().bottom <= top + 3);
+  }, undefined, { timeout: 4000 });
+  const geometry = await panel.evaluate(() => {
+    const selected = [...document.querySelectorAll('.echo-cue.selected')];
+    const top = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
+    return { rowIndices: selected.map(el => el.dataset.rowIndex), viewport: [innerWidth, innerHeight], contentTop: top,
+      selectedTop: selected[0].getBoundingClientRect().top, gap: selected[0].getBoundingClientRect().top - top,
+      previousBottom: selected[0].closest('li').previousElementSibling?.getBoundingClientRect().bottom ?? null, scrollY };
+  });
+  (report.topFollow ??= []).push({ name, ...geometry }); check(name);
+}
+async function screenshot(name) {
+  const geometry = () => ({ scrollY, width: innerWidth, height: innerHeight,
+    card: document.querySelector('.practice-card')?.getBoundingClientRect().toJSON(),
+    chart: document.querySelector('.practice-chart')?.getBoundingClientRect().toJSON() });
+  const before = await panel.evaluate(geometry);
+  await panel.screenshot({ path: join(evidence, name) }); report.screenshots.push(name);
+  (report.screenshotGeometry ??= []).push({ name, before, after: await panel.evaluate(geometry) });
 }
 try {
   context = await chromium.launchPersistentContext(profile, { executablePath, headless: true, viewport: { width: 1200, height: 950 },
@@ -221,6 +259,7 @@ try {
     check(`${platform}: two sentence cycles never request a microphone`, await panel.evaluate(() => window.__microphoneRequests) === 0);
     await panel.locator('.echo-cue.selected').filter({ hasText: rows[2].content }).waitFor();
     check(`${platform}: sidebar selection follows the third sentence without user input`);
+    await assertTopFollow(`${platform}: automatically highlighted third sentence has 32px top breathing room`);
     await panel.getByRole('button', { name: '暂停', exact: true }).waitFor();
     await panel.locator('.echo-shell').evaluate(el => el.scrollIntoView({ block: 'start' }));
     const name = `shadowing-${platform}-simulated-test-browser.png`;
@@ -268,11 +307,28 @@ try {
     await button.click(); await panel.locator('.echo-shell[data-play-mode="auto"]').waitFor();
     check(`${platform}: second button click restores continuous mode`, (await panel.locator('.echo-toast').textContent()).includes('自动连续播放'));
 
+    await microphone.hover();
+    await panel.getByRole('tooltip').filter({ hasText: '开启跟读模式' }).waitFor();
+    check(`${platform}: microphone hover shows function and F without a native title`,
+      await microphone.getAttribute('aria-keyshortcuts') === 'F' && await microphone.getAttribute('title') === null
+      && (await panel.getByRole('tooltip').filter({ hasText: '开启跟读模式' }).textContent()).includes('(F)'));
+    await page.locator('#movie_player').focus();
+    await page.keyboard.down('f'); await panel.locator('.echo-shell[data-play-mode="practice"]').waitFor();
+    await page.keyboard.down('f'); await page.keyboard.down('f'); await page.keyboard.up('f');
+    check(`${platform}: page F enters practice once; repeat/release do not reach site fullscreen`,
+      await microphone.getAttribute('aria-pressed') === 'true' && await page.evaluate(() => window.__nativeFEvents) === 0);
+    await panel.keyboard.press('f'); await panel.locator('.echo-shell[data-play-mode="auto"]').waitFor();
+    check(`${platform}: panel F exits practice independently of E`);
+    await page.getByRole('textbox', { name: '视频页面测试输入框' }).fill('');
+    await page.getByRole('textbox', { name: '视频页面测试输入框' }).press('f');
+    check(`${platform}: page text input keeps F as text`, await page.getByRole('textbox').inputValue() === 'f'
+      && await microphone.getAttribute('aria-pressed') === 'false');
     await microphone.click(); await panel.locator('.echo-shell[data-play-mode="practice"]').waitFor();
     await panel.getByRole('region', { name: '跟读练习', exact: true }).waitFor();
     check(`${platform}: microphone opens separate recording practice, not sentence shadowing`,
       await button.getAttribute('aria-pressed') === 'false' && await microphone.getAttribute('aria-pressed') === 'true');
     await panel.locator('.echo-cue').first().click();
+    await assertTopFollow(`${platform}: first sentence has top breathing room without half-screen padding`);
     await page.waitForFunction(() => { const v = document.querySelector('video'); return v.paused && Math.abs(v.currentTime - 3) < .02; });
     await page.waitForTimeout(3_100);
     check(`${platform}: recording practice stays on its sentence without automatic next`,
@@ -281,18 +337,211 @@ try {
     await panel.getByRole('button', { name: '停止录音', exact: true }).waitFor();
     check(`${platform}: R starts recording only in microphone mode using a synthetic device`);
     await page.waitForTimeout(1_100); await page.keyboard.press('r');
-    const audio = panel.getByLabel('录音回放', { exact: true }); await audio.waitFor();
+    const audio = panel.getByLabel('录音回放', { exact: true }); await audio.waitFor({ state: 'attached' });
     await audio.evaluate(element => new Promise(resolve => {
       if (element.readyState >= 1) resolve(); else element.addEventListener('loadedmetadata', resolve, { once: true });
     }));
     check(`${platform}: recording is saved as playable audio`, await audio.evaluate(element => element.duration > 0 && !element.error));
+    for (const durationMs of [1_400, 1_700]) {
+      await page.keyboard.press('r'); await panel.getByRole('button', { name: '停止录音', exact: true }).waitFor();
+      await page.waitForTimeout(durationMs); await page.keyboard.press('r');
+      await panel.getByRole('button', { name: '录音', exact: true }).waitFor();
+      await panel.getByRole('button', { name: '录音', exact: true }).isEnabled();
+      await panel.getByRole('button', { name: '选择录音', exact: true }).click();
+      await panel.getByRole('button', { name: `录音 #${durationMs === 1_400 ? 2 : 3}`, exact: true }).waitFor();
+      await panel.keyboard.press('Escape');
+    }
+    check(`${platform}: custom player removes native download/speed and duplicate recording history`,
+      await audio.getAttribute('controls') === null && await panel.locator('.practice-recordings details').count() === 0);
     await page.keyboard.press('p');
     await panel.getByRole('img', { name: /^音高曲线/ }).waitFor();
     check(`${platform}: existing pitch chart still renders in recording practice`);
+    await panel.locator('.practice-amplitude-reference .recharts-area-area').waitFor();
+    await panel.waitForFunction(() => !!document.querySelector('.practice-pitch-reference .recharts-line-curve')?.getAttribute('d'));
+    check(`${platform}: volume area is filled and pitch is an unfilled line with speech gaps`,
+      (await panel.locator('.practice-amplitude-reference .recharts-area-area').getAttribute('fill')).startsWith('url(')
+      && await panel.locator('.practice-pitch-reference .recharts-line-curve').getAttribute('fill') === 'none'
+      && (await panel.locator('.practice-pitch-reference .recharts-line-curve').getAttribute('d') ?? '').split('M').length > 2
+      && await panel.locator('.practice-progress .recharts-area-area').count() === 0);
+    await panel.getByRole('button', { name: '显示音量强度', exact: true }).click();
+    check(`${platform}: volume toggle hides only amplitude shading`, await panel.locator('.practice-amplitude-reference').count() === 0
+      && await panel.locator('.practice-pitch-reference').count() > 0);
+    await panel.getByRole('button', { name: '显示音量强度', exact: true }).click();
+    await panel.getByRole('button', { name: '显示原声曲线', exact: true }).click();
+    check(`${platform}: source toggle hides original pitch and volume together`, await panel.locator('.practice-pitch-reference').count() === 0
+      && await panel.locator('.practice-amplitude-reference').count() === 0);
+    await panel.getByRole('button', { name: '显示原声曲线', exact: true }).click();
+    const selectedRecordings = [];
+    for (const number of [1, 2, 3]) {
+      await panel.getByRole('button', { name: '选择录音', exact: true }).click();
+      check(`${platform}: numbered menu exposes all three recordings`, await panel.locator('.practice-recording-choice').count() === 3);
+      await panel.getByRole('button', { name: `录音 #${number}`, exact: true }).click();
+      await panel.waitForFunction(() => document.querySelector('.practice-pitch-recording .recharts-line-curve')?.getAttribute('d'));
+      const selection = await panel.evaluate(async () => {
+        const container = document.querySelector('.practice-recordings'), player = container.querySelector('audio');
+        const db = await new Promise((resolve, reject) => { const req = indexedDB.open('VideoLanguageHelperPractice'); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+        const row = await new Promise((resolve, reject) => { const req = db.transaction('recordings').objectStore('recordings').get(container.dataset.recordingId); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+        db.close();
+        const digest = async blob => [...new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))].map(n => n.toString(16).padStart(2, '0')).join('');
+        return { id: row.id, take: row.take, storedHash: await digest(row.audio), playingHash: await digest(await (await fetch(player.src)).blob()),
+          paused: player.paused, time: player.currentTime, rate: player.playbackRate, curve: document.querySelector('.practice-pitch-recording .recharts-line-curve').getAttribute('d') };
+      });
+      selectedRecordings.push(selection);
+      check(`${platform}: choosing recording #${number} selects its exact stored audio and resets without autoplay`,
+        selection.take === number && selection.storedHash === selection.playingHash && selection.paused && selection.time === 0 && selection.rate === 1);
+      await panel.getByRole('button', { name: '播放录音', exact: true }).click();
+      await panel.waitForFunction(() => document.querySelector('.practice-recordings audio').currentTime > .1);
+      check(`${platform}: recording #${number} plays at normal speed`, await audio.evaluate(el => !el.paused && el.playbackRate === 1));
+    }
+    (report.recordingSelections ??= {})[platform] = selectedRecordings;
+    check(`${platform}: switching takes updates both recording audio and orange contour`,
+      new Set(selectedRecordings.map(row => row.playingHash)).size === 3 && new Set(selectedRecordings.map(row => row.curve)).size === 3);
+    await panel.getByRole('button', { name: '暂停录音回放', exact: true }).click();
+    await panel.getByRole('slider', { name: '录音播放进度' }).fill('0.5');
+    check(`${platform}: recording progress seeks the native audio`, await audio.evaluate(el => Math.abs(el.currentTime - .5) < .05));
+    await assertTopFollow(`${platform}: recording changes keep the highlight top-aligned`);
+    await panel.getByRole('button', { name: '选择录音', exact: true }).click();
+    await screenshot(`recording-menu-${platform}-simulated-test-browser.png`);
+    await panel.setViewportSize({ width: 320, height: 760 });
+    await assertTopFollow(`${platform}: narrow recording view retains the highlight breathing room`);
+    const narrowFits = () => {
+      const boxes = [...document.querySelector('.practice-playback-row').children].map(el => el.getBoundingClientRect());
+      const menu = document.querySelector('.practice-recordings-menu').getBoundingClientRect();
+      return menu.left >= 0 && menu.right <= innerWidth && menu.bottom <= innerHeight
+        && boxes.every(box => box.left >= 0 && box.right <= innerWidth)
+        && boxes.every((box, i) => boxes.slice(i + 1).every(other => box.right <= other.left + 1));
+    };
+    await panel.waitForFunction(narrowFits);
+    check(`${platform}: custom recording controls and open menu fit a narrow sidebar`, await panel.evaluate(narrowFits));
+    await screenshot(`recording-menu-narrow-${platform}-simulated-test-browser.png`);
+    await panel.setViewportSize({ width: 430, height: 900 });
+    await panel.getByRole('button', { name: '删除录音 #2', exact: true }).click();
+    await panel.getByRole('button', { name: '录音 #2', exact: true }).waitFor({ state: 'detached' });
+    check(`${platform}: deleting a different recording preserves the selected take and stable numbers`,
+      await panel.getByRole('button', { name: '录音 #3', exact: true }).getAttribute('aria-pressed') === 'true'
+      && await panel.locator('.practice-recording-choice').count() === 2);
+    await panel.getByRole('button', { name: '录音 #1', exact: true }).click();
+    await panel.getByRole('button', { name: '选择录音', exact: true }).click();
+    await panel.getByRole('button', { name: '删除录音 #1', exact: true }).click();
+    await panel.waitForFunction(() => document.querySelector('.practice-recordings audio')?.currentTime === 0);
+    await panel.getByRole('button', { name: '选择录音', exact: true }).click();
+    check(`${platform}: deleting the selected take falls back to the remaining recording without autoplay`,
+      await panel.getByRole('button', { name: '录音 #3', exact: true }).getAttribute('aria-pressed') === 'true'
+      && await audio.evaluate(el => el.paused && el.currentTime === 0));
+    await panel.keyboard.press('Escape');
+    // Like a user inspecting the exercise, scroll its card into view after
+    // the top-follow assertion. Do not hide an off-screen chart in the evidence.
+    await panel.mouse.move(200, 400); await panel.mouse.wheel(0, 300);
+    // The compositor applies wheel deltas asynchronously. Wait for it before
+    // positioning the card, otherwise a pending wheel can undo the capture frame.
+    await panel.waitForTimeout(200);
+    await panel.locator('.practice-card').evaluate(el => {
+      const rect = el.getBoundingClientRect();
+      const top = document.querySelector('.echo-toast').getBoundingClientRect().bottom;
+      const bottom = document.querySelector('.echo-player').getBoundingClientRect().top;
+      scrollBy({ top: (rect.top + rect.bottom - top - bottom) / 2, behavior: 'instant' });
+    });
+    await panel.waitForFunction(() => {
+      const card = document.querySelector('.practice-card').getBoundingClientRect();
+      return card.top >= document.querySelector('.echo-toast').getBoundingClientRect().bottom
+        && card.bottom <= document.querySelector('.echo-player').getBoundingClientRect().top;
+    });
+    const help = panel.getByRole('button', { name: '如何读懂音高图表', exact: true });
+    await help.hover();
+    const helpBubble = panel.getByRole('tooltip').filter({ hasText: '如何读懂图表' }); await helpBubble.waitFor();
+    check(`${platform}: chart hover has the reference explanation and black/white styling`,
+      (await helpBubble.innerText()).includes('底部阴影区域表示音量强度，空白处代表停顿')
+      && await helpBubble.evaluate(el => getComputedStyle(el).backgroundColor === 'rgb(9, 9, 9)' && getComputedStyle(el).color === 'rgb(255, 255, 255)'));
+    check(`${platform}: complete pitch card and recording controls are visible for screenshot review`, await panel.locator('.practice-card').evaluate(el => {
+      const card = el.getBoundingClientRect();
+      return card.top >= document.querySelector('.echo-toast').getBoundingClientRect().bottom
+        && card.bottom <= document.querySelector('.echo-player').getBoundingClientRect().top;
+    }));
+    await screenshot(`pitch-help-${platform}-simulated-test-browser.png`);
+    await panel.keyboard.press('Escape'); await helpBubble.waitFor({ state: 'detached' });
+    await help.focus(); await helpBubble.waitFor();
+    check(`${platform}: keyboard focus opens help and Escape dismisses without toggling the chart`);
+    await panel.keyboard.press('Escape'); await helpBubble.waitFor({ state: 'detached' });
+    await microphone.hover();
+    await panel.getByRole('tooltip').filter({ hasText: '跟读模式已开启' }).waitFor();
+    await screenshot(`microphone-help-${platform}-simulated-test-browser.png`);
+    check(`${platform}: active microphone hint states pause, S replay and F close`,
+      (await panel.getByRole('tooltip').filter({ hasText: '跟读模式已开启' }).innerText()).includes('按 S 重播；F 关闭'));
     const practiceScreenshot = `recording-${platform}-simulated-test-browser.png`;
     await panel.screenshot({ path: join(evidence, practiceScreenshot) }); report.screenshots.push(practiceScreenshot);
     await page.keyboard.press('h'); await panel.getByRole('textbox', { name: '听写输入' }).waitFor();
     check(`${platform}: H remains available only within recording practice`);
+    const dictationInput = panel.getByRole('textbox', { name: '听写输入' });
+    await dictationInput.fill(''); await dictationInput.press('f');
+    check(`${platform}: dictation input keeps F as text without closing practice`, await dictationInput.inputValue() === 'f'
+      && await microphone.getAttribute('aria-pressed') === 'true');
+    await page.locator('#movie_player').focus(); await page.keyboard.press('h');
+    // The previous test only sampled the first sentence. Cover a real seek before capture.
+    await panel.locator('.echo-cue').nth(2).click();
+    await page.waitForFunction(() => { const v = document.querySelector('video'); return v.paused && Math.abs(v.currentTime - 8) < .02; });
+    await panel.getByRole('button', { name: '录音', exact: true }).click();
+    await panel.getByRole('button', { name: '停止录音', exact: true }).waitFor();
+    await page.waitForTimeout(1_100); await panel.getByRole('button', { name: '停止录音', exact: true }).click();
+    await panel.getByRole('button', { name: '录音', exact: true }).waitFor();
+    await page.locator('video').evaluate(video => {
+      window.__captureEvents = [];
+      for (const type of ['seeking', 'seeked', 'play', 'pause', 'emptied']) video.addEventListener(type, () => window.__captureEvents.push({ type, time: video.currentTime, seeking: video.seeking, wallMs: performance.now() }));
+    });
+    await panel.getByRole('button', { name: '音高曲线', exact: true }).click();
+    await panel.locator('.practice-pitch-reference .recharts-line-curve').waitFor();
+    check(`${platform}: nonzero segment captures original audio after seeking without self-cancellation`);
+    (report.captureEvents ??= {})[platform] = await page.evaluate(() => window.__captureEvents);
+    // Invalidate just this session's cached original by leaving/reentering another segment.
+    await panel.locator('.echo-cue').nth(1).click();
+    await page.waitForFunction(() => { const v = document.querySelector('video'); return v.paused && Math.abs(v.currentTime - 5) < .02; });
+    await panel.getByRole('button', { name: '录音', exact: true }).click();
+    await panel.getByRole('button', { name: '停止录音', exact: true }).waitFor();
+    await page.waitForTimeout(1_100); await panel.getByRole('button', { name: '停止录音', exact: true }).click();
+    await panel.getByRole('button', { name: '录音', exact: true }).waitFor();
+    await panel.getByRole('button', { name: '音高曲线', exact: true }).click();
+    await panel.getByText('正在播放片段并采集原声…', { exact: true }).waitFor();
+    await page.waitForFunction(() => !document.querySelector('video').paused && document.querySelector('video').currentTime > 3.1);
+    await page.locator('video').evaluate(v => { v.currentTime = 12; });
+    await panel.getByText('原声采集已取消', { exact: false }).waitFor();
+    // SVG horizontal pitch lines have zero geometric height but a visible stroke.
+    await panel.locator('.practice-pitch-recording .recharts-line-curve').waitFor({ state: 'attached' });
+    await panel.locator('.practice-chart').waitFor();
+    await panel.waitForFunction(() => !!document.querySelector('.practice-pitch-recording .recharts-line-curve')?.getAttribute('d'));
+    check(`${platform}: manual seek cancels original capture but keeps the selected recording curve and playback`,
+      await panel.getByRole('button', { name: '播放录音', exact: true }).isEnabled()
+      && await page.locator('video').evaluate(v => v.paused && v.currentTime === 12));
+    (report.captureCancellations ??= {})[platform] = { message: await panel.locator('.practice-pitch-notice').innerText(),
+      events: await page.evaluate(() => window.__captureEvents),
+      recordingCurve: await panel.locator('.practice-pitch-recording .recharts-line-curve').getAttribute('d') };
+    await screenshot(`recording-fallback-${platform}-simulated-test-browser.png`);
+    await panel.getByRole('button', { name: '重试原声', exact: true }).click();
+    await panel.locator('.practice-pitch-reference .recharts-line-curve').waitFor();
+    check(`${platform}: retry restores original alongside the existing recording curve`, await panel.locator('.practice-pitch-recording .recharts-line-curve').count() === 1);
+    await panel.locator('.echo-cue').first().click();
+    await panel.getByRole('button', { name: '选择录音', exact: true }).click();
+    check(`${platform}: saved recording and number survive leaving and reopening its sentence`,
+      await panel.getByRole('button', { name: '录音 #3', exact: true }).getAttribute('aria-pressed') === 'true'
+      && await panel.locator('.practice-recording-choice').count() === 1);
+    await panel.keyboard.press('Escape');
+    await panel.locator('.echo-cue').last().click(); await assertTopFollow(`${platform}: last sentence aligns below the top with trailing scroll space`);
+    await panel.getByRole('button', { name: '向前扩展片段', exact: true }).click();
+    await assertTopFollow(`${platform}: multi-sentence practice range keeps its first sentence at the top`);
+    await panel.getByRole('button', { name: '收缩片段开头', exact: true }).click();
+    await assertTopFollow(`${platform}: contracted practice range re-aligns below the top`);
+    await panel.setViewportSize({ width: 320, height: 760 });
+    await assertTopFollow(`${platform}: narrow-sidebar wrapping preserves breathing room`);
+    check(`${platform}: narrow footer controls do not overlap or leave the viewport`, await panel.locator('.echo-player').evaluate(footer => {
+      const boxes = [...footer.querySelectorAll('button')].map(el => el.getBoundingClientRect());
+      return boxes.every(box => box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight)
+        && boxes.every((box, i) => boxes.slice(i + 1).every(other => box.right <= other.left + 1 || other.right <= box.left + 1));
+    }));
+    await microphone.hover();
+    await screenshot(`narrow-top-follow-${platform}-simulated-test-browser.png`);
+    await panel.setViewportSize({ width: 430, height: 900 });
+    await assertTopFollow(`${platform}: restored sidebar size preserves breathing room`);
+    await panel.mouse.wheel(0, -120); await panel.waitForTimeout(200);
+    const manualScroll = await panel.evaluate(() => scrollY); await panel.waitForTimeout(350);
+    check(`${platform}: media updates do not fight manual scrolling`, Math.abs(await panel.evaluate(() => scrollY) - manualScroll) < 2);
     await button.click(); await panel.locator('.echo-shell[data-play-mode="shadowing"]').waitFor();
     await panel.getByRole('region', { name: '跟读练习', exact: true }).waitFor({ state: 'detached' });
     const requests = await panel.evaluate(() => window.__microphoneRequests);
@@ -308,7 +557,7 @@ try {
   check('no application errors or alert placeholders', report.errors.length === 0);
   check('build files unchanged during browser verification', JSON.stringify(buildFiles) === JSON.stringify(await outputHashes()));
   report.passed = true; report.finishedAt = new Date().toISOString();
-  await copyFile(join(evidence, 'shadowing-youtube-simulated-test-browser.png'), join(artifacts, 'verification_latest.png'));
+  await copyFile(join(evidence, 'recording-menu-youtube-simulated-test-browser.png'), join(artifacts, 'verification_latest.png'));
   await writeFile(join(artifacts, 'verification_latest.json'), JSON.stringify(report, null, 2));
   log(`PASS ${report.checks.length}/${report.checks.length}; warnings=${report.warnings.length}`);
   log(`SCREENSHOT ${join(artifacts, 'verification_latest.png')}`);
@@ -316,8 +565,10 @@ try {
 } catch (error) {
   report.passed = false; report.failure = error.stack; report.finishedAt = new Date().toISOString();
   if (page) report.failureMedia = await page.locator('video').evaluate(v => ({ time: v.currentTime, paused: v.paused,
-    timeline: window.__shadowingTimeline })).catch(() => null);
+    timeline: window.__shadowingTimeline, captureEvents: window.__captureEvents })).catch(() => null);
+  if (page) await writeFile(join(evidence, 'failure-page.html'), await page.content().catch(() => 'unavailable'));
   if (panel) { await panel.screenshot({ path: join(evidence, 'failure-simulated-test-browser.png') }).catch(() => {});
+    await writeFile(join(evidence, 'failure-panel.html'), await panel.content().catch(() => 'unavailable'));
     await writeFile(join(evidence, 'failure-dom.txt'), await panel.locator('body').innerText().catch(() => 'unavailable')); }
   await writeFile(join(artifacts, 'verification_latest.json'), JSON.stringify(report, null, 2));
   console.error(`[verify] FAIL ${error.message}`); process.exitCode = 1;

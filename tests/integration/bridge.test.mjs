@@ -599,6 +599,23 @@ test('YouTube practice button replays its current phrase and page R/H reach the 
   }
 });
 
+test('YouTube F toggles practice through the panel without leaking repeats or release to fullscreen', async t => {
+  const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
+  const count = () => h.messages.filter(m => m.type === 'player-shortcut' && m.action === 'practice').length;
+  assert.equal(h.keyEvent('keydown', 'KeyF').stopped, true);
+  assert.equal(h.keyEvent('keydown', 'KeyF', { repeat: true }).stopped, true);
+  assert.equal(h.keyEvent('keypress', 'KeyF').stopped, true);
+  assert.equal(h.keyEvent('keyup', 'KeyF').stopped, true); assert.equal(count(), 1);
+  assert.equal(h.keyEvent('keyup', 'KeyF').stopped, false);
+  h.key('KeyF'); assert.equal(count(), 2);
+  h.keyEvent('keydown', 'KeyF'); h.keyEvent('blur', '');
+  assert.equal(h.keyEvent('keyup', 'KeyF').stopped, false);
+  const before = count();
+  for (const extra of [{ isTrusted: false }, { ctrlKey: true }, { repeat: true }, { target: { closest: () => ({}) } }])
+    assert.equal(h.key('KeyF', extra).stopped, false);
+  h.disconnect(); assert.equal(h.key('KeyF').stopped, false); assert.equal(count(), before);
+});
+
 test('YouTube sentence-only mode neither forwards recording keys nor accepts audio capture', async t => {
   const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
   const first = h.state().cues[0]; h.seek(first, 'shadowing'); await tick(); await tick();

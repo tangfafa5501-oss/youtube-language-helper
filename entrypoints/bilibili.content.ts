@@ -223,7 +223,11 @@ export default defineContentScript({
       } catch { if (clients.has(port)) try { port.postMessage({ type: 'playback', message: '播放被浏览器拦截',
         videoId: binding.videoId, session: binding.session, trackId: state.trackId }); } catch { /* disconnected */ } }
     }
+    let ownsPracticePress = false;
     ctx.addEventListener(window, 'keydown', event => {
+      if (event.isTrusted && event.code === 'KeyF' && ownsPracticePress) {
+        event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
       const current = biliVideo(location.href), binding = state.video;
       if (!event.isTrusted || state.status !== 'loaded' || !binding || !current || `${current.bvid}:p${current.page}` !== settledKey) return;
       const action = shortcutAction(event, true), owner = [...clients].at(-1);
@@ -234,8 +238,15 @@ export default defineContentScript({
       // One key goes to one panel, then reuses its existing seek/playback state machine.
       try { owner.postMessage({ type: 'bilibili-shortcut', action, videoId: binding.videoId,
         session: binding.session, trackId: state.trackId }); } catch { clients.delete(owner); return; }
+      if (event.code === 'KeyF') ownsPracticePress = true;
       event.preventDefault(); event.stopImmediatePropagation();
     }, { capture: true });
+    for (const type of ['keypress', 'keyup'] as const) ctx.addEventListener(window, type, event => {
+      if (!event.isTrusted || event.code !== 'KeyF' || !ownsPracticePress) return;
+      if (type === 'keyup') ownsPracticePress = false;
+      event.preventDefault(); event.stopImmediatePropagation();
+    }, { capture: true });
+    ctx.addEventListener(window, 'blur', () => { ownsPracticePress = false; });
     browser.runtime.onConnect.addListener(port => {
       if (port.name !== PORT || port.sender?.id !== browser.runtime.id || port.sender?.url !== browser.runtime.getURL('/sidepanel.html')) return;
       clients.add(port); port.postMessage(state); void refresh();

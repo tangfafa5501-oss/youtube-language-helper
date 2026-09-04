@@ -16,7 +16,7 @@ test('playback rate steps and shortcut defaults follow Enjoy media controls', ()
   assert.equal(adjacentPlaybackRate(1.25, -1), 1);
   assert.deepEqual(PLAYER_SHORTCUTS, {
     playOrPause: 'Space', previous: 'KeyA', replay: 'KeyS', next: 'KeyD',
-    toggleEcho: 'KeyE', toggleDictation: 'KeyH', record: 'KeyR', playRecording: 'KeyG',
+    toggleEcho: 'KeyE', togglePractice: 'KeyF', toggleDictation: 'KeyH', record: 'KeyR', playRecording: 'KeyG',
     decreaseRate: 'Comma', increaseRate: 'Period',
   });
 });

@@ -1,0 +1,8 @@
+.ylh-hint-anchor { display: inline-flex; flex: none; align-items: center; vertical-align: middle; }
+.ylh-tooltip { position: fixed; z-index: 120; box-sizing: border-box; width: max-content; max-width: calc(100vw - 16px); padding: 8px 12px; border-radius: 8px; background: #090909; color: #fff; font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; overflow-wrap: anywhere; }
+.ylh-tooltip-help { width: 320px; }
+.ylh-tooltip-control { max-width: min(420px, calc(100vw - 16px)); }
+.ylh-tooltip-title { display: block; margin-bottom: 4px; font-weight: 500; }
+.ylh-tooltip::after { content: ''; position: absolute; left: var(--hint-arrow); transform: translateX(-50%); border: 6px solid transparent; }
+.ylh-tooltip[data-side="top"]::after { top: 100%; border-top-color: #090909; border-bottom-width: 0; }
+.ylh-tooltip[data-side="bottom"]::after { bottom: 100%; border-bottom-color: #090909; border-top-width: 0; }

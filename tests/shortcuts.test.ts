@@ -4,12 +4,23 @@ import { isShortcutAction, shortcutAction } from '../lib/shortcuts.ts';
 
 test('native keyboard decoder maps learning shortcuts without a focus library', () => {
   for (const [code, action] of [['KeyA', 'previous'], ['KeyS', 'replay'], ['KeyD', 'next'], ['KeyE', 'shadowing'],
-    ['Space', 'play']]) assert.equal(shortcutAction({ code }), action);
+    ['KeyF', 'practice'], ['Space', 'play']]) assert.equal(shortcutAction({ code }), action);
   assert.equal(shortcutAction({ code: 'KeyK', key: 'k' }), null, 'K is no longer an extension shortcut');
   assert.equal(shortcutAction({ code: 'Comma', shiftKey: true }), 'slower');
   assert.equal(shortcutAction({ code: 'Period', shiftKey: true }), 'faster');
   assert.equal(shortcutAction({ code: 'Slash', key: '?', shiftKey: true }), 'help');
   assert.equal(shortcutAction({ code: 'KeyQ' }), null);
+});
+
+test('F toggles recording practice independently and respects typing, modifiers and held keys', () => {
+  assert.equal(shortcutAction({ code: 'KeyF', key: 'f' }), 'practice');
+  assert.equal(isShortcutAction('practice'), true);
+  assert.equal(shortcutAction({ code: 'KeyF', target: { closest: () => ({}) } }), null);
+  for (const flag of ['ctrlKey', 'metaKey', 'altKey', 'repeat', 'isComposing', 'defaultPrevented', 'shiftKey'])
+    assert.equal(shortcutAction({ code: 'KeyF', [flag]: true }), null);
+  assert.equal(shortcutAction({ code: 'KeyF', repeat: true }, true), null);
+  assert.equal(shortcutAction({ code: 'KeyE' }), 'shadowing');
+  assert.equal(shortcutAction({ code: 'Space' }), 'play');
 });
 
 test('button focus keeps Space on play/pause rather than activating an unrelated control', () => {
