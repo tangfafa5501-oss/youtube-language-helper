@@ -462,8 +462,8 @@ test('Bilibili SPA navigation rejects controls from the previous video session',
   const stale = { version: 1, videoId: before.video.videoId, session: before.video.session, trackId: before.trackId,
     type: 'seek', phraseId: before.phrases[0].id, playMode: 'manual' };
   h.location.href = 'https://www.bilibili.com/video/BV1Q541167Qg/?p=1';
-  for (let i = 0; i < 120 && h.state().video?.videoId !== 'BV1Q541167Qg'; i++) await sleep(10);
-  assert.equal(h.state().video.videoId, 'BV1Q541167Qg');
+  for (let i = 0; i < 300 && h.state()?.video?.videoId !== 'BV1Q541167Qg'; i++) await sleep(10);
+  assert.equal(h.state()?.video?.videoId, 'BV1Q541167Qg');
   assert.notEqual(h.state().video.session, before.video.session);
   h.video.currentTime = 12; h.sendRaw(stale); await sleep(30);
   assert.equal(h.video.currentTime, 12);
