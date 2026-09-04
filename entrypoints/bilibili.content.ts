@@ -232,7 +232,7 @@ export default defineContentScript({
       if (!event.isTrusted || state.status !== 'loaded' || !binding || !current || `${current.bvid}:p${current.page}` !== settledKey) return;
       const action = shortcutAction(event, true), owner = [...clients].at(-1);
       if (!action || !owner) return;
-      if (['record', 'dictation', 'pitch', 'play-recording', 'cancel-recording', 'dictation-focus',
+      if (['record', 'dictation', 'pitch', 'play-recording', 'assess-recording', 'cancel-recording', 'dictation-focus',
         'expand-start', 'expand-end', 'contract-start', 'contract-end'].includes(action) && playback.mode !== 'practice') return;
       if (event.repeat) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       // One key goes to one panel, then reuses its existing seek/playback state machine.

@@ -1,4 +1,25 @@
-# Design QA — 录音条目与顶部留白（2026-09-04 最新）
+# Design QA — 有道发音评估（2026-09-04 最新）
+
+## 本轮目标与实测边界
+
+目标流程：麦克风练习 → 选择录音 → 播放键旁“评估发音 (V)” → 处理状态 → 分数/逐词音素详情；三点菜单换录音后，分数及回放均绑定所选条目。参考用户截图 `C:/Users/alxanday/AppData/Local/Temp/codex-clipboard-7986b99a-e17a-49bc-94fe-5fabb6b9f161.png` 的星光按钮位置和悬停文案，图标复用现有许可资产，不复制Enjoy源码或账号服务。
+
+使用React性能技能：用户事件直接发起评估，不用状态effect触发付费请求；音频转换与结果面板按需加载。使用前端测试技能：Browser plugin not available，采用项目已有Playwright独立Chrome，未安装新依赖。
+
+| 检查 | 结果 |
+| --- | --- |
+| 页面身份/非空/错误覆盖层 | 通过：扩展sidepanel.html、Video Language Helper、实际字幕及练习UI，无构建报错遮罩 |
+| 交互 | 两平台V桥接、重复请求阻断、缓存查看、录音切换、余额错误恢复、删除与重开持久化通过 |
+| 布局 | 430×900与320×760，星光按钮紧邻录音播放、进度条前；窄屏无横向溢出，详情纵向滚动 |
+| 提示与输入 | 黑底白字“评估发音 (V)”；输入框内V仍输入文字；密钥password控件，保存清空、不回显 |
+| 控制台 | 应用错误0；52条preload/cross-world警告保留在报告，未称零警告 |
+| 数据真实性 | 实际扩展、DOM、录制/解码/数据库；虚拟麦克风、字幕与有道响应仿真，无真实账号/API调用 |
+
+最终证据：`artifacts/doctor/2026-09-04T03-42-01-720Z/`；`assessment-button-*`、`assessment-result-*`、`assessment-result-narrow-*`、`assessment-settings-*` 图片均含 `simulated-test-browser` 后缀，已逐图检查按钮、结果、设置与窄屏。最新verification_latest.png与YouTube结果图哈希一致。浏览器Chrome152.0.7977.65 / Windows / Node26.3.0，2026-09-04T03:42:08.532Z—03:43:50.465Z；构建 `d257c526fad91b681bbf796db8ab069bfa94ab4f98916f818a1700fa815c6b0f`，基于9de0ef6未提交工作树。
+
+有意差异：使用有道的四项真实字段，不照搬Azure韵律评分；详情最大65vh以容纳窄侧栏音素列表。保留项目E/F/Space语义，不因参考图改变它们。图中84.5为模拟接口的固定测试分，不能代表真实评分能力。真实有道服务与物理人声待凭据在本机配置后的专项验收。
+
+## 前一阶段：录音条目与顶部留白
 
 ## 目标、状态和证据
 

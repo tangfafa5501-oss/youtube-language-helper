@@ -7,6 +7,7 @@ import { join, resolve, dirname, basename, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import { connect } from './lib/cdp.js';
+import { assessmentFixture, verifyAssessment } from './lib/verify-assessment.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const output = join(root, '.output/chrome-mv3'), artifacts = join(root, 'artifacts');
@@ -20,7 +21,7 @@ const log = message => console.log(`[verify] ${message}`);
 const report = { startedAt: new Date().toISOString(), head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
   environment: `${process.platform} / Node ${process.version}`, evidenceTier: 'independent-test-browser / actual unpacked extension / simulated media and caption APIs',
   browserPath: 'Browser plugin not available; project Playwright', realNetworkApi: false, dailyBrowserTouched: false,
-  microphoneSource: 'Chromium fake device in disposable test profile; no physical microphone',
+  microphoneSource: 'Generated continuous-tone WAV through Chromium file-backed fake microphone; no physical microphone',
   spaceKeyupModel: 'simulated YouTube page keyup toggle; real Chromium keyboard down/repeat/up events',
   pitchSource: 'generated variable-frequency/volume WAV with real silence; native playback and real browser audio analysis',
   checks: [], errors: [], warnings: [], runtimeHashes: [], requests: [], screenshots: [] };
@@ -70,6 +71,17 @@ for (let i = 0; i < 16_000 * 18; i++) {
   wav.writeInt16LE(Math.round(volume * Math.sin(tonePhase)), 44 + i * 2);
 }
 const media = `data:audio/wav;base64,${wav.toString('base64')}`;
+// Chromium's default fake microphone beeps intermittently. A recording may contain
+// amplitude but no sustained pitch. Use a deterministic voiced input for this test,
+// while the separate original-video fixture above still exercises real silence.
+const microphoneWav = Buffer.from(wav); let microphonePhase = 0;
+for (let i = 0; i < 16_000 * 18; i++) {
+  const time = i / 16000; microphonePhase += 2 * Math.PI * (210 + 45 * Math.sin(time * 2.7)) / 16000;
+  microphoneWav.writeInt16LE(Math.round(7000 * Math.sin(microphonePhase)), 44 + i * 2);
+}
+const microphoneFile = join(evidence, 'microphone-continuous-tone-simulated.wav');
+await writeFile(microphoneFile, microphoneWav);
+report.microphoneFixtureSha256 = hash(microphoneWav);
 const rows = [
   { from: 0, to: 3, content: 'Hello, lovely students, and welcome to your pronunciation training session.' },
   { from: 3, to: 5, content: 'Today, I am very excited to help you pronounce everyday words.' },
@@ -165,7 +177,7 @@ try {
     // can disable the extension loaded through the official CDP loader.
     ignoreDefaultArgs: ['--disable-extensions'], args: [`--load-extension=${output}`,
       '--enable-unsafe-extension-debugging', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--autoplay-policy=no-user-gesture-required',
-      '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+      '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${microphoneFile}`] });
   context.setDefaultTimeout(15_000);
   const portText = await readFile(join(profile, 'DevToolsActivePort'), 'utf8');
   const port = Number(portText.split(/\r?\n/)[0]); assert.ok(port > 0 && port < 65536);
@@ -185,8 +197,12 @@ try {
   const worker = await waitTarget('background service worker', t => t.type === 'service_worker' && t.url === `chrome-extension://${id}/background.js`);
   check('fresh-profile extension background is running');
   const workerSession = (await cdp.send('Target.attachToTarget', { targetId: worker.targetId, flatten: true })).sessionId;
+  const youdaoFixture = assessmentFixture(cdp, workerSession, report);
   cdp.on(event => {
     if (event.method !== 'Fetch.requestPaused' || event.sessionId !== workerSession) return;
+    if (event.params.request.url.startsWith('https://openapi.youdao.com/')) {
+      void youdaoFixture.handle(event.params).catch(error => report.errors.push(error.message)); return;
+    }
     const payload = fixture(event.params.request.url); report.requests.push(event.params.request.url.split('?')[0]);
     void cdp.send(payload ? 'Fetch.fulfillRequest' : 'Fetch.failRequest', payload ? {
       requestId: event.params.requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
@@ -194,7 +210,7 @@ try {
       .catch(error => report.errors.push(error.message));
   });
   await cdp.send('Fetch.enable', { patterns: [{ urlPattern: 'https://api.bilibili.com/*' },
-    { urlPattern: 'https://*.hdslb.com/*' }, { urlPattern: 'https://www.youtube.com/api/timedtext*' }] }, workerSession);
+    { urlPattern: 'https://*.hdslb.com/*' }, { urlPattern: 'https://www.youtube.com/api/timedtext*' }, { urlPattern: 'https://openapi.youdao.com/*' }] }, workerSession);
   page = context.pages()[0] ?? await context.newPage();
   await page.goto('https://www.bilibili.com/video/BV1GJ411x7h7/');
   await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2);
@@ -542,6 +558,7 @@ try {
     await panel.mouse.wheel(0, -120); await panel.waitForTimeout(200);
     const manualScroll = await panel.evaluate(() => scrollY); await panel.waitForTimeout(350);
     check(`${platform}: media updates do not fight manual scrolling`, Math.abs(await panel.evaluate(() => scrollY) - manualScroll) < 2);
+    await verifyAssessment({ panel, page, platform, fixture: youdaoFixture, check, screenshot });
     await button.click(); await panel.locator('.echo-shell[data-play-mode="shadowing"]').waitFor();
     await panel.getByRole('region', { name: '跟读练习', exact: true }).waitFor({ state: 'detached' });
     const requests = await panel.evaluate(() => window.__microphoneRequests);
@@ -557,7 +574,8 @@ try {
   check('no application errors or alert placeholders', report.errors.length === 0);
   check('build files unchanged during browser verification', JSON.stringify(buildFiles) === JSON.stringify(await outputHashes()));
   report.passed = true; report.finishedAt = new Date().toISOString();
-  await copyFile(join(evidence, 'recording-menu-youtube-simulated-test-browser.png'), join(artifacts, 'verification_latest.png'));
+  await captureRuntimeHashes(id);
+  await copyFile(join(evidence, 'assessment-result-youtube-simulated-test-browser.png'), join(artifacts, 'verification_latest.png'));
   await writeFile(join(artifacts, 'verification_latest.json'), JSON.stringify(report, null, 2));
   log(`PASS ${report.checks.length}/${report.checks.length}; warnings=${report.warnings.length}`);
   log(`SCREENSHOT ${join(artifacts, 'verification_latest.png')}`);

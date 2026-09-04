@@ -59,7 +59,7 @@ const SHORTCUT_SECTIONS = [
     ['E', '切换逐句跟读'], ['F', '切换麦克风跟读模式'], ['A', '上一句'], ['S', '重播当前句'], ['D', '下一句'],
   ] },
   { title: '跟读模式控制', items: [
-    ['R', '开始/停止录音'], ['G', '播放录音'], ['Esc', '取消录音'],
+    ['R', '开始/停止录音'], ['G', '播放录音'], ['V', '评估发音/查看评分'], ['Esc', '取消录音'],
     ['P', '切换音高曲线'], ['[ / ]', '扩展片段'], ['Shift + [ / ]', '收缩片段'],
   ] },
   { title: '听写模式控制', items: [
@@ -285,6 +285,7 @@ function App() {
   const practiceSegment: PracticeSegment | null = video && state.trackId && navigationIndex >= 0 && endIndex >= navigationIndex ? {
     videoId: video.videoId, session: video.session, trackId: state.trackId, startMs: echoRows[navigationIndex]!.startMs!,
     endMs: echoRows[endIndex]!.endMs!, text: echoRows.slice(navigationIndex, endIndex + 1).map(row => row.text).join(' '),
+    language: state.language ?? video.tracks.find(track => track.id === state.trackId)?.language,
   } : null;
 
   useCueFollow(view === 'reader' && state.status === 'loaded' && activeId

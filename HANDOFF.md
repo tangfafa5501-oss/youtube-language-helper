@@ -1,5 +1,53 @@
 # Video Language Helper 交接记录
 
+## 2026-09-04：有道发音评估（当前最新）
+
+阶段提交范围：用户已授权将本节对应的实现、测试和文档共 28 个明确文件提交到本地 Git，不推送远程。提交保留 pre-commit 的源码一致性、单元、构建、类型检查及独立测试浏览器验收；确切提交号以包含本节的 Git 提交为准。新的钩子运行记录保存在 `artifacts/doctor/<运行时间>/`，下方记录保留为实现阶段的验收证据，不混写时间。
+
+### 1. 我们在做什么
+
+用户选定有道轻量 HTTP 方案并明确授权“已经获得有道的 id 和密钥了，可以开始”。在现有录音播放键旁添加 Enjoy 风格的“评估发音 (V)”，独立实现，不复制其扩展代码或使用其账号服务。沿用 React/WXT、现有 IndexedDB、原生 Web Audio/Web Crypto/fetch，无新依赖、SDK、Python 服务或模型。
+
+### 2. 完成了什么
+
+- 设置新增“发音评估 · 有道”：填写应用 ID/App Key 与应用密钥/App Secret；保存后清空输入、不回显，返回的状态只有 configured/permitted。凭据仅存在 `chrome.storage.local` 的 `youdao-assessment-v1`，先锁定 TRUSTED_CONTEXTS；保护失败不读写、不发请求。保存不调用付费接口，清除会取消等待任务并保留本地录音/评分。新增网络权限仅限 `https://openapi.youdao.com/*`。
+- 当前录音播放行新增星光按钮、黑白悬停说明及 V；处理中禁用重复提交，成功后显示分数，点击或 V 打开已存结果。综合、准确度、流利度、完整度及单词/音素诊断均取自有道返回，缺字段不编造；不使用其未启用的 intonation/emotion 字段冒充韵律分。
+- `lib/assessment-audio.ts`：按需解码原 MP3 的副本、重采样至16kHz、混为单声道、编码16bit PCM WAV，不改变原录音及回放速度。120秒硬上限，空/无效/过大音频先拒绝；不截断后伪装完整评估。
+- `lib/youdao.ts` / `assessment-service.ts`：固定 HTTPS POST、URLSearchParams、v2 SHA-256 签名，25秒超时、响应限长、HTTP与业务错误分别校验。只接受本扩展的准确设置页/侧栏来源，评估仅侧栏可发起；原文取自该录音数据库记录，不信任消息附带文本。同一录音并发合并，其他录音等待；失败不自动重试，超时提示可能已有用量。
+- `lib/assessment-store.ts`：后台用两个原生 IndexedDB 操作读录音/更新评分；不建库、不迁移、不覆盖其他字段。提交结果时录音已删除就丢弃，绝不重建。侧栏继续使用既有 Dexie；避免后台再打包一份库。`PracticeRecording.assessment` 为可选字段，旧数据无需迁移。
+- 切换录音显示其自身评分；切句/卸载组件后晚到结果不抢开旧面板。成功评分存于本条录音，清除凭据后也可本地查看。E、F、Space、Recharts及两平台字幕行为保持；两平台内容脚本只在练习动作限制列表中增加 `assess-recording`。README 更新使用和上传/计费边界。
+
+#### 闭环验证卡片
+
+- 以下实现阶段验收基于 `9de0ef69c67ae33ca0b5335ca86db58537449615` 的未提交工作树。该次构建 SHA-256：`d257c526fad91b681bbf796db8ab069bfa94ab4f98916f818a1700fa815c6b0f`；main.tsx SHA-256：`3c922a9d29da4f1ca25af04921c90f296b0d1e7bf9259c85bde996dd1e23f4c8`。
+- `npm run doctor` Exit 0：145/145单元测试、构建 Exit 0、类型检查 Exit 0、200/200浏览器断言；无自愈补丁。最终生产包另跑集成测试92/92，Exit 0。`git diff --check` 通过。package/lock、`lib/playback-machine.ts`、`lib/youtube-native.ts`、`lib/microphone.ts`、`components/pitch-curve.tsx` 无 diff。
+- 运行目录：`artifacts/doctor/2026-09-04T03-42-01-720Z/`，包含 doctor.log、unit.log、build.log、typecheck.log、e2e.log、integration.log、doctor-report.json、browser-report.json。doctor 时间 `2026-09-04T03:42:01.721Z`—`03:43:50.887Z`；浏览器时间 `03:42:08.532Z`—`03:43:50.465Z`。产物更新时间 `03:42:06.528Z`。
+- 环境：Windows / Node26.3.0 / Playwright / Chrome152.0.7977.65，独立临时配置加载 `.output/chrome-mv3`；Browser plugin not available，沿用已有 Playwright。真实媒体时钟、录制、音频解码、数据库、DOM、运行脚本；**字幕/API、视频WAV、麦克风WAV与有道评分均为仿真**。日常Chrome未操作，实际账号凭据未读取，未访问真实有道评测服务、未产生其用量。
+- 28条运行脚本哈希核对记录匹配磁盘。应用错误0；52条preload/cross-world警告保留，不称“控制台全零”。两平台总计6次被拦截的模拟有道请求：签名、PCM头、文本、音频哈希有记录；没有保存原密钥或音频base64到报告。生产产物扫描未含测试凭据/模拟响应标识。
+- 两平台验证按钮位置/V悬停、真实键盘桥接、输入框不抢键、重复V仅一次请求、缺凭据不请求、保存不请求、逐词音素详情、320px边界、余额错误后解锁、明确重试、晚到结果不串档、切换/删除/重开持久化、清除凭据后缓存可读。既有E句间停顿、F练习、Space松键、录音菜单、音高、32px高亮留白回归通过。
+- 图像：目录下 `assessment-button-{bilibili,youtube}-simulated-test-browser.png`、`assessment-result-*-simulated-test-browser.png`、`assessment-result-narrow-*-simulated-test-browser.png`、`assessment-settings-*-simulated-test-browser.png`。最新 `artifacts/verification_latest.png` 是本次YouTube结果面板截图，身份见配套JSON；图片SHA-256 `926c8748c13138c1ad003dffa2204ee5b678e4e141cba6ea9d982d356e13d748`。图中84.5等分数明确是测试数据，不是真实人声评估。
+- 体积：最终63个产物共1,254,915字节（约1.25 MB），不是node_modules磁盘大小。后台31.86 kB；本轮初版因重复Dexie为136.90 kB，去重后减少约105 kB。相较上一阶段后台23.48 kB，新增评估后台约8.38 kB。没有增删依赖。
+
+### 3. 卡在哪里
+
+代码及上述仿真验收完成；真实有道账户连通性、余额/服务绑定和真实人声评分质量未测。用户表示已取得凭据，但未提供本机配置路径，本轮没有搜索私人配置或索取聊天明文密钥。需在扩展设置中录入后，针对一条真实录音进行单独的实际API验收；不能把本次模拟分数当作其结果。未重载用户日常Chrome，不能宣称installed-real。
+
+### 4. 下一步计划
+
+1. 凭据在本机扩展设置保存后，以一条用户选定的录音执行真实评估，明确有道会计费；只记录脱敏错误码/结果，不记录签名或密钥。
+2. 检查真实返回的评分、音素与字幕/录音对应关系，另记环境、构建和时间；如返回108/110/202/205/401，按页面提示核对应用、绑定、签名或余额，不自动重复请求。
+3. 本次已授权本地阶段提交，仅暂存本轮明确文件、保留doctor钩子并核对Git；推送远程仍需单独授权。
+
+### 5. 碰到哪些问题
+
+新增E2E模块首次有map括号遗漏，语法检查后修正；首次完整浏览器回归在既有YouTube音高断言失败，03-36-56目录留有失败图。该图有录音音量但无音高，Chromium默认间歇蜂鸣的短录音不能保证持续有声；改用固定、连续变频WAV作为虚拟麦克风后通过，未动生产音高算法。03-39-42已通过198项，但后续去掉后台重复Dexie，最终以03-42-01的200项和新构建哈希为准。
+
+### 6. 如何避免再次出现
+
+复用浏览器标准能力与现有组件，音频转换/结果视图只在用户操作时加载。新付费入口须隔离信任边界、从记录绑定原文、做并发去重与超时提示；不把HTTP200直接当作评分成功。UI录音与E逐句停顿保持独立。测试麦克风输入应可重复，模拟与真实接口证据始终分开。详情只显示供应商确实提供的字段；不能借通用大模型或音高图编造发音分。
+
+---
+
 ## 2026-09-04：录音条目切换、顶部留白与原声取消边界
 
 阶段提交范围：用户已授权将本节与上一节的实现、测试及文档一起提交到本地 Git，不推送远程。共 28 个明确文件；提交保留 pre-commit 的源码一致性、单元、构建、类型检查与独立测试浏览器验收。确切提交号以包含本节的 Git 提交为准；新增钩子运行记录保存在 `artifacts/doctor/<运行时间>/`，不把下方既有验收时间混写为本次运行。

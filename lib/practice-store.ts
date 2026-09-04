@@ -1,7 +1,8 @@
 import Dexie, { type Table } from 'dexie';
 import { practiceKey, type DictationResult, type PracticeSegment } from './practice';
+import type { PronunciationAssessment } from './youdao';
 
-export type PracticeRecording = { id: string; key: string; createdAt: number; audio: Blob; durationMs: number; segment: PracticeSegment; take?: number };
+export type PracticeRecording = { id: string; key: string; createdAt: number; audio: Blob; durationMs: number; segment: PracticeSegment; take?: number; assessment?: PronunciationAssessment };
 export type DictationAttempt = { id: string; key: string; createdAt: number; input: string; result: DictationResult };
 class PracticeDatabase extends Dexie {
   recordings!: Table<PracticeRecording, string>;

@@ -39,6 +39,8 @@ async function harness(restrict = true, response = () => Response.json({}), { de
   });
   const send = (type, payload = {}, url = 'chrome-extension://own/options.html') => dispatch(
     { channel: 'ylh-service-v1', version: 1, type, ...payload }, { id: 'own', url });
+  const sendYoudao = (type, payload = {}, url = 'chrome-extension://own/options.html') => dispatch(
+    { channel: 'ylh-youdao-v1', version: 1, type, ...payload }, { id: 'own', url });
   const sendNative = (type, payload = {}, sender = {}) => dispatch(
     { channel: 'ylh-youtube-native-v1', version: 1, type, videoId: 'X627czLUsGY', language: 'en', kind: 'manual', ...payload },
     { id: 'own', frameId: 0, url: 'https://www.youtube.com/watch?v=X627czLUsGY', tab: { id: 1 }, ...sender });
@@ -50,11 +52,30 @@ async function harness(restrict = true, response = () => Response.json({}), { de
       bvid: 'BV1GJ411x7h7', page: 1,
       track: { id: 'bili:9', name: '中文 (AI)', language: 'ai-zh', kind: 'asr', url: 'https://i0.hdslb.com/ai.json' }, ...payload },
     { id: 'own', frameId: 0, url: 'https://www.bilibili.com/video/BV1GJ411x7h7/', tab: { id: 1 }, ...sender });
-  return { send, sendNative, sendNativeLatest, sendBili, requests, headerRules, removed, updated, completed, sentToTabs, setStored: value => { data = value; },
+  return { send, sendYoudao, sendNative, sendNativeLatest, sendBili, requests, headerRules, removed, updated, completed, sentToTabs, setStored: value => { data = value; },
     setCurrentTabUrl: value => { currentTabUrl = value; },
     localStored: () => structuredClone(data),
     sessionStored: () => structuredClone(sessionData), get permissionRemoved() { return permissionRemoved; } };
 }
+
+test('production Youdao settings store only local credentials, never return them, and never call an API on save', async () => {
+  const h = await harness();
+  const credentials = { appKey: 'simulated-app', appSecret: 'simulated-secret-not-valid' };
+  assert.equal((await h.sendYoudao('save', credentials)).ok, true);
+  assert.deepEqual(h.localStored()['youdao-assessment-v1'], credentials);
+  assert.deepEqual(await h.sendYoudao('status'), { ok: true, configured: true, permitted: true });
+  assert.equal(JSON.stringify((await h.send('settings')).settings).includes('simulated'), false);
+  await h.sendYoudao('clear'); assert.equal(h.localStored()['youdao-assessment-v1'], undefined);
+  assert.equal(h.requests.length, 0);
+});
+test('production Youdao route rejects content scripts and protected-storage failure without credentials or network access', async () => {
+  const h = await harness(), denied = await harness(false);
+  for (const type of ['status', 'save', 'clear', 'assess']) {
+    assert.equal((await h.sendYoudao(type, {}, 'https://www.youtube.com/watch?v=X627czLUsGY')).ok, false);
+    assert.equal((await denied.sendYoudao(type)).ok, false);
+  }
+  assert.equal(h.requests.length, 0); assert.equal(denied.requests.length, 0);
+});
 
 test('production Bilibili relay sets a scoped Referer rule before fetching and preserves raw cue timing', async () => {
   const body = [{ from: 1.234, to: 4.567, content: '这是 AI 保底字幕。' }];

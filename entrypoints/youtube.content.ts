@@ -430,7 +430,7 @@ export default defineContentScript({
       const binding = state.video, owner = [...clients].at(-1), action = shortcutAction(event, true);
       if (!event.isTrusted || !action || state.status !== 'loaded' || !binding || !owner
         || watchVideoId(location.href) !== binding.videoId || !videoElement()?.readyState) return;
-      if (['record', 'dictation', 'pitch', 'play-recording', 'cancel-recording', 'dictation-focus',
+      if (['record', 'dictation', 'pitch', 'play-recording', 'assess-recording', 'cancel-recording', 'dictation-focus',
         'expand-start', 'expand-end', 'contract-start', 'contract-end'].includes(action) && playback.mode !== 'practice') return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (event.code === 'Space') ownsSpacePress = true;

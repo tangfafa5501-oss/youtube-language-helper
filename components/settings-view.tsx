@@ -3,6 +3,7 @@ import * as Select from '@radix-ui/react-select';
 import { ArrowLeft, Check, ChevronDown, CircleSlash2, Database, Languages, Palette, RotateCcw, Sparkles } from './icons';
 import { SERVICE_CHANNEL, type PublicSettings, type ServiceReply, type ThemeSetting } from '../lib/settings';
 import { applyTheme } from '../lib/theme';
+import { YoudaoSettings } from './youdao-settings';
 import './settings-view.css';
 
 const defaults: PublicSettings = { language: 'en', theme: 'system', displayMode: 'phrases' };
@@ -78,6 +79,7 @@ export function SettingsView({ onBack, onSettings }: { onBack?: () => void; onSe
         </div>
       </section>
 
+      <YoudaoSettings/>
       <section className="settings-section">
         <div className="settings-section-title"><Sparkles/><div><h2>AI 服务</h2><p>为后续翻译与语言功能预留。</p></div></div>
         <div className="settings-card settings-disabled-card">

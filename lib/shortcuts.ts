@@ -1,7 +1,7 @@
 import { PLAYER_SHORTCUTS } from './protocol.ts';
 
 export const SHORTCUT_ACTIONS = ['play', 'previous', 'replay', 'next', 'shadowing', 'practice', 'slower', 'faster', 'help', 'reserved',
-  'dictation', 'record', 'play-recording', 'cancel-recording', 'pitch', 'dictation-focus',
+  'dictation', 'record', 'play-recording', 'assess-recording', 'cancel-recording', 'pitch', 'dictation-focus',
   'expand-start', 'expand-end', 'contract-start', 'contract-end'] as const;
 export type ShortcutAction = typeof SHORTCUT_ACTIONS[number];
 export function isShortcutAction(value: unknown): value is ShortcutAction {
@@ -36,6 +36,7 @@ export function shortcutAction(event: KeyInput, captureSpaceRepeat = false): Sho
     case PLAYER_SHORTCUTS.toggleDictation: return 'dictation';
     case PLAYER_SHORTCUTS.record: return 'record';
     case PLAYER_SHORTCUTS.playRecording: return 'play-recording';
+    case 'KeyV': return 'assess-recording';
     case 'Escape': return 'cancel-recording';
     case 'KeyP': return 'pitch';
     case 'Slash': return 'dictation-focus';

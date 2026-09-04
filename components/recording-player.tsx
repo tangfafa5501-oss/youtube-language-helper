@@ -1,16 +1,21 @@
-import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
+import { lazy, Suspense, useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import type { PracticeRecording } from '../lib/practice-store';
-import { MoreVertical, Pause, Play, Trash } from './icons';
+import { MoreVertical, Pause, Play, Trash, Sparkles, RotateCcw } from './icons';
+import { HoverHint } from './hover-hint';
+import { useRecordingAssessment } from './use-recording-assessment';
+import './assessment.css';
+const AssessmentResult = lazy(() => import('./assessment-result'));
 
-export type RecordingPlayerHandle = { pause: () => void; toggle: () => void };
+export type RecordingPlayerHandle = { pause: () => void; toggle: () => void; assess: () => void };
 type Props = { recordings: PracticeRecording[]; selectedId: string; onSelect: (id: string) => void;
-  onRemove: (id: string) => void; ref?: Ref<RecordingPlayerHandle> };
+  onRemove: (id: string) => void; assessmentDisabled?: boolean; ref?: Ref<RecordingPlayerHandle> };
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds) % 60).padStart(2, '0')}`;
 
 /** Native audio decoding, with only the recording controls we actually offer. */
-export function RecordingPlayer({ recordings, selectedId, onSelect, onRemove, ref }: Props) {
+export function RecordingPlayer({ recordings, selectedId, onSelect, onRemove, assessmentDisabled = false, ref }: Props) {
   const selected = recordings.find(row => row.id === selectedId);
+  const assessment = useRecordingAssessment(selected, assessmentDisabled);
   const audio = useRef<HTMLAudioElement>(null);
   const [url, setUrl] = useState(''), [playing, setPlaying] = useState(false), [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0), [error, setError] = useState(''), [open, setOpen] = useState(false);
@@ -29,7 +34,7 @@ export function RecordingPlayer({ recordings, selectedId, onSelect, onRemove, re
     if (player.ended) player.currentTime = 0;
     void player.play().catch(reason => { if (reason?.name !== 'AbortError') setError('录音回放失败，请重新选择录音'); });
   };
-  useImperativeHandle(ref, () => ({ pause: () => audio.current?.pause(), toggle }));
+  useImperativeHandle(ref, () => ({ pause: () => audio.current?.pause(), toggle, assess: () => { void assessment.assess(); } }));
   if (!selected) return null;
   const choose = (id: string) => {
     audio.current?.pause();
@@ -46,6 +51,14 @@ export function RecordingPlayer({ recordings, selectedId, onSelect, onRemove, re
     <div className="practice-playback-row">
       <button className="practice-playback-toggle" type="button" aria-label={playing ? '暂停录音回放' : '播放录音'}
         aria-keyshortcuts="G" title={playing ? '暂停录音回放 (G)' : '播放录音 (G)'} onClick={toggle}>{playing ? <Pause/> : <Play/>}</button>
+      <HoverHint content={assessment.pending ? '正在评估，请勿重复提交' : assessment.result ? '查看发音评分 (V)' : '评估发音 (V)'}>
+        <button type="button" className="practice-assess" data-assessment-trigger="true" aria-keyshortcuts="V"
+          aria-label={assessment.pending ? '正在评估发音' : assessment.result ? '查看发音评分' : '评估发音'} aria-busy={!!assessment.pending}
+          disabled={assessmentDisabled || !!assessment.pending} onClick={() => void assessment.assess()}>
+          {assessment.pending ? <span className="assessment-spinner"><RotateCcw/></span> : assessment.result
+            ? <span className="assessment-score-badge">{Math.round(assessment.result.overall)}</span> : <Sparkles/>}
+        </button>
+      </HoverHint>
       <input className="practice-playback-progress" type="range" min="0" max={duration || 1} step="0.01"
         value={Math.min(position, duration)} disabled={!url || !duration} aria-label="录音播放进度"
         aria-valuetext={`${clock(position)} / ${clock(duration)}`} onChange={event => {
@@ -67,5 +80,9 @@ export function RecordingPlayer({ recordings, selectedId, onSelect, onRemove, re
       </Popover.Root>
     </div>
     {error && <p className="practice-error" role="alert">{error}</p>}
+    {assessment.error && <p className="practice-error" role="alert" data-assessment-error="true">{assessment.error}</p>}
+    {assessment.result && assessment.open && <Suspense fallback={<p role="status">正在打开评分…</p>}>
+      <AssessmentResult key={selectedId} result={assessment.result} open={assessment.open} onOpenChange={assessment.setOpen} take={selected.take}/>
+    </Suspense>}
   </div>;
 }

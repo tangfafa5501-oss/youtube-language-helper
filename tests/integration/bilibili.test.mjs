@@ -368,7 +368,7 @@ test('Bilibili unsupported audio capture restores the player and returns a bound
 test('Bilibili sentence-only mode neither forwards recording keys nor accepts audio capture', async t => {
   const h = await harness(t), first = h.state().phrases[0];
   h.send({ type: 'seek', phraseId: first.id, playMode: 'shadowing' }); await sleep(20);
-  for (const key of ['KeyR', 'KeyH', 'KeyP', 'KeyG', 'BracketLeft']) assert.equal(h.key(key).defaultPrevented, false);
+  for (const key of ['KeyR', 'KeyH', 'KeyP', 'KeyG', 'KeyV', 'BracketLeft']) assert.equal(h.key(key).defaultPrevented, false);
   const time = h.video.currentTime;
   h.send({ type: 'practice-capture', phraseId: first.id, requestId: 'not-recording-mode' }); await sleep(20);
   assert.match(h.messages.find(message => message.requestId === 'not-recording-mode')?.error, /麦克风进入跟读模式/);

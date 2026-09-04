@@ -2,6 +2,7 @@ import { diffWords, type Change } from 'diff';
 
 export type PracticeSegment = {
   videoId: string; session: string; trackId: string; startMs: number; endMs: number; text: string;
+  language?: string;
 };
 // History survives reconnects; live work is additionally bound to a session.
 export function practiceKey(segment: PracticeSegment) {

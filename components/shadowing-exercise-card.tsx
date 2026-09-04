@@ -98,6 +98,7 @@ export default function ShadowingExerciseCard({ segment, dictation, currentTimeM
     if (action === 'record') { void toggleRecording(); return true; }
     if (action === 'cancel-recording') { if (status === 'recording') cancel(); return true; }
     if (action === 'play-recording') { audio.current?.toggle(); return true; }
+    if (action === 'assess-recording') { audio.current?.assess(); return true; }
     if (action === 'pitch') { if (status === 'idle' && !saving) setExpanded(value => !value); return true; }
     if (action === 'dictation-focus' && dictation) { focus.current?.(); return true; }
     return false;
@@ -135,7 +136,8 @@ export default function ShadowingExerciseCard({ segment, dictation, currentTimeM
         {recordingError && <p className="practice-error" role="status">{recordingError}</p>}
         {analyzing && <p className="practice-help" role="status">正在分析录音音高…</p>}
       </div>}
-      {recordings.length > 0 && <RecordingPlayer ref={audio} recordings={recordings} selectedId={selectedId} onSelect={setSelectedId} onRemove={id => void remove(id)}/>}
+      {recordings.length > 0 && <RecordingPlayer ref={audio} recordings={recordings} selectedId={selectedId} onSelect={setSelectedId} onRemove={id => void remove(id)}
+        assessmentDisabled={status !== 'idle' || saving || capturing}/>}
       {status === 'recording' && <div className="practice-live" role="status"><span className="practice-pulse"/>录音中 {durationText(duration)}<meter min="0" max="100" value={power} aria-label="麦克风音量"/></div>}
       <div className="practice-record-action"><button aria-label={status === 'recording' ? '停止录音' : '录音'} className={`practice-primary practice-record ${status === 'recording' ? 'recording' : ''}`}
         disabled={status === 'requesting' || status === 'stopping' || saving || capturing} onClick={() => void toggleRecording()}>

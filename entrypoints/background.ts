@@ -1,6 +1,9 @@
 import { record, watchVideoId } from '../lib/captions';
 import { registerBilibiliNetwork } from '../lib/bilibili-background';
 import { SERVICE_CHANNEL, trustedServiceSender, type PublicSettings, type ServiceReply } from '../lib/settings';
+import { createAssessmentService } from '../lib/assessment-service';
+import { YOUDAO_CHANNEL, YOUDAO_ORIGIN } from '../lib/youdao';
+import { readAssessmentRecording, saveRecordingAssessment } from '../lib/assessment-store';
 import { YOUTUBE_NATIVE_CACHE_KEY, YOUTUBE_NATIVE_CHANNEL, applyNativeAuth, boundedNativeCache, chooseNativeTranscript,
   observedTimedText, timedTextFormat, validNativeTranscript, type NativeAuth, type NativeTrackKind,
   type NativeTranscript } from '../lib/youtube-native';
@@ -9,6 +12,19 @@ export default defineBackground(() => {
   registerBilibiliNetwork();
   // Fail closed: do not save/read a secret unless content-script access is off.
   const protectedStorage = browser.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).then(() => true, () => false);
+  const assessmentKey = 'youdao-assessment-v1';
+  const assessmentService = createAssessmentService({
+    extensionId: browser.runtime.id, protectedStorage,
+    permitted: () => browser.permissions.contains({ origins: [YOUDAO_ORIGIN] }),
+    readCredentials: async () => (await browser.storage.local.get(assessmentKey))[assessmentKey],
+    writeCredentials: async value => { if (value) await browser.storage.local.set({ [assessmentKey]: value }); else await browser.storage.local.remove(assessmentKey); },
+    getRecording: readAssessmentRecording,
+    saveAssessment: saveRecordingAssessment,
+  });
+  browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!record(message) || message.channel !== YOUDAO_CHANNEL || message.version !== 1) return;
+    void assessmentService(message, sender).then(sendResponse); return true;
+  });
   const settingsKey = 'settings-v2';
   const legacySettingsKey = 'supadata-v1';
   const nativeAuth = new Map<string, NativeAuth>();

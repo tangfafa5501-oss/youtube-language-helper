@@ -587,13 +587,13 @@ test('YouTube clamps a manual sentence end to media duration', async t => {
   assert.equal(h.video.currentTime, 1.2);
 });
 
-test('YouTube practice button replays its current phrase and page R/H reach the panel', async t => {
+test('YouTube practice button replays its current phrase and page R/H/V reach the panel', async t => {
   const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
   const first = h.state().cues[0]; h.seek(first, 'practice'); await tick(); await tick();
   h.video.currentTime = first.endMs / 1000; await new Promise(resolve => setTimeout(resolve, 40));
   h.send({ version: 1, type: 'practice-toggle', videoId: h.state().video.videoId, session: h.state().video.session });
   await tick(); await tick(); assert.equal(h.video.currentTime, first.startMs / 1000); assert.equal(h.video.paused, false);
-  for (const [key, action] of [['KeyR', 'record'], ['KeyH', 'dictation']]) {
+  for (const [key, action] of [['KeyR', 'record'], ['KeyH', 'dictation'], ['KeyV', 'assess-recording']]) {
     assert.equal(h.key(key).defaultPrevented, true);
     assert.ok(h.messages.some(message => message.type === 'player-shortcut' && message.action === action));
   }
@@ -619,7 +619,7 @@ test('YouTube F toggles practice through the panel without leaking repeats or re
 test('YouTube sentence-only mode neither forwards recording keys nor accepts audio capture', async t => {
   const h = await harness(t); await nativeCues(h, [1_000, 3_000]);
   const first = h.state().cues[0]; h.seek(first, 'shadowing'); await tick(); await tick();
-  for (const key of ['KeyR', 'KeyH', 'KeyP', 'KeyG', 'BracketLeft']) assert.equal(h.key(key).defaultPrevented, false);
+  for (const key of ['KeyR', 'KeyH', 'KeyP', 'KeyG', 'KeyV', 'BracketLeft']) assert.equal(h.key(key).defaultPrevented, false);
   const time = h.video.currentTime;
   h.send({ version: 1, type: 'practice-capture', phraseId: first.cueId, requestId: 'not-recording-mode',
     videoId: h.state().video.videoId, session: h.state().video.session }); await tick();
