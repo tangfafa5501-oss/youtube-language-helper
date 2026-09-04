@@ -6,10 +6,19 @@ dist/
 coverage/
 test-results/
 playwright-report/
-artifacts/doctor/
-artifacts/doctor.lock
-artifacts/verification_latest.png
-artifacts/verification_latest.json
+artifacts/
+docs/evidence/
+docs/internal/
+design-qa.md
+docs/improvement-ledger.md
+docs/m0-validation.md
+docs/research-notes.md
+docs/subtitle-diagnosis.md
+
+# Local agent and session context
+AGENTS.md
+.cursorrules
+HANDOFF.md
 
 # Private configuration and captured user data
 .env

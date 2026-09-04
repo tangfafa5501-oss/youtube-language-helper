@@ -23,7 +23,18 @@
 
 ## 安装与开始
 
-需要 **Chrome 120+、Node.js 22+**。
+### 直接安装
+
+使用 **Chrome 120 或更新版本**。从 [Releases](https://github.com/tangfafa5501-oss/youtube-language-helper/releases/latest) 下载文件名包含 `chrome.zip` 的运行包，不要下载 GitHub 自动生成的 Source code。
+
+1. 解压 ZIP 并将文件夹放在固定位置。
+2. 打开 `chrome://extensions/`，开启“开发者模式”。
+3. 点击“加载已解压的扩展程序”，选择包含 `manifest.json` 的解压文件夹。
+4. 打开或刷新 YouTube / B站视频，点击扩展图标打开侧栏。
+
+### 从源码构建
+
+需要 **Node.js 22+**。
 
 1. 下载或克隆仓库，在项目根目录执行：
 
@@ -77,3 +88,11 @@ npm run verify    # 构建与扩展端到端测试
 ## 第三方许可
 
 第三方代码与图标的版权、许可声明保留在 [public/licenses](public/licenses/)，依赖版本见 [package.json](package.json)。其中 [Pitchfinder/YIN](public/licenses/pitchfinder-notice.txt) 含 GPL-3.0-or-later 代码；分发包含该代码的组合程序时，须按 [GPL](https://www.gnu.org/licenses/gpl-3.0.html#section5) 保留声明、授权并提供对应源码。
+
+## 参与贡献与安全报告
+
+项目采用 [GNU GPL v3.0 only](LICENSE)。你可以使用、修改和分发，也可以商业使用，但分发衍生版本时必须继续遵守 GPL 并提供对应源码。项目名称和官方身份的使用边界见 [TRADEMARKS.md](TRADEMARKS.md)。
+
+除单独标明的第三方组件外，项目原创代码版权归 `tangfafa5501-oss` 所有。开源授权不会转移版权。
+
+提交问题或代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全漏洞请按 [SECURITY.md](SECURITY.md) 私下报告，不要公开披露可利用细节。

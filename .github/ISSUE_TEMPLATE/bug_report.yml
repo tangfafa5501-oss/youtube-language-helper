@@ -1,0 +1,42 @@
+name: 错误报告
+description: 报告可以稳定复现的功能问题
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: 安全漏洞请使用 Security Advisory 私下报告，不要在这里提交密钥、Cookie、录音或个人数据。
+  - type: input
+    id: version
+    attributes:
+      label: 扩展版本
+      placeholder: 例如 v0.0.1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 视频网站
+      options: [YouTube, B站, 两者, 其他]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开视频开始，依次说明操作。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为与实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: Chrome 版本、操作系统、视频是否有字幕、是否登录；请勿提供账号或密钥。
+    validations:
+      required: true
