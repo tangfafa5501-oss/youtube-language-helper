@@ -2,7 +2,7 @@
   "name": "youtube-language-helper",
   "description": "YouTube and Bilibili caption learning helper — M0",
   "private": true,
-  "version": "0.0.4",
+  "version": "0.0.5",
   "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "wxt",
     "build": "wxt build",
+    "icons": "node scripts/generate-extension-icons.mjs",
     "doctor": "node scripts/doctor.js",
     "verify": "npm run build && node scripts/verify-extension.js",
     "zip": "wxt zip",

@@ -35,7 +35,7 @@ export function assessmentFixture(cdp, session, report) {
     } };
 }
 
-export async function verifyAssessment({ panel, page, platform, fixture, check, screenshot }) {
+export async function verifyAssessment({ panel, page, platform, fixture, check, screenshot, revealControlBar }) {
   const label = name => `${platform}: pronunciation ${name}`;
   const count = () => fixture.requests.length;
   const initialCount = count();
@@ -48,7 +48,11 @@ export async function verifyAssessment({ panel, page, platform, fixture, check, 
     const row = await new Promise((resolve, reject) => { const req = db.transaction('recordings').objectStore('recordings').get(id); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
     db.close(); return { id, text: row.segment.text, assessment: row.assessment ?? null, size: row.audio.size, type: row.audio.type };
   });
-  const settings = async () => { await panel.getByRole('button', { name: '更多选项', exact: true }).click(); await panel.getByRole('menuitem', { name: '设置', exact: true }).click(); };
+  const settings = async () => {
+    await revealControlBar('top');
+    await panel.getByRole('button', { name: '更多选项', exact: true }).click();
+    await panel.getByRole('menuitem', { name: '设置', exact: true }).click();
+  };
   const close = async () => { await panel.getByRole('button', { name: '关闭发音评估', exact: true }).click(); await panel.locator('.assessment-dialog').waitFor({ state: 'detached' }); };
   await panel.locator('.echo-cue').first().click();
   await panel.locator('[data-assessment-trigger]').waitFor();
