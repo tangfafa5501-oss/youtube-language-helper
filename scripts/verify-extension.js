@@ -145,20 +145,28 @@ async function captureRuntimeHashes(extensionId) {
     off(); await cdp.send('Debugger.disable', {}, session); await cdp.send('Target.detachFromTarget', { sessionId: session });
   }
 }
-async function assertTopFollow(name) {
+async function assertSmartFollow(name) {
   await panel.waitForFunction(() => {
     const selected = [...document.querySelectorAll('.echo-cue.selected')];
     if (!selected.length) return false;
-    const top = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
-    const previous = selected[0].closest('li').previousElementSibling;
-    return Math.abs(selected[0].getBoundingClientRect().top - top - 32) <= 3
-      && (!previous || previous.getBoundingClientRect().bottom <= top + 3);
+    const contentTop = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
+    const footerTop = document.querySelector('.echo-player').getBoundingClientRect().top;
+    const usableTop = contentTop + 24, usableBottom = footerTop - 24;
+    const first = selected[0].getBoundingClientRect(), last = selected.at(-1).getBoundingClientRect();
+    const blockHeight = last.bottom - first.top, available = Math.max(1, usableBottom - usableTop);
+    const rowIndex = Number(selected[0].dataset.rowIndex ?? 0);
+    const keepNearTop = selected.length === 1 && rowIndex < 2;
+    const expectedTop = keepNearTop || blockHeight >= available ? usableTop : usableTop + (available - blockHeight) / 2;
+    return Math.abs(first.top - expectedTop) <= 4;
   }, undefined, { timeout: 4000 });
   const geometry = await panel.evaluate(() => {
     const selected = [...document.querySelectorAll('.echo-cue.selected')];
-    const top = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
-    return { rowIndices: selected.map(el => el.dataset.rowIndex), viewport: [innerWidth, innerHeight], contentTop: top,
-      selectedTop: selected[0].getBoundingClientRect().top, gap: selected[0].getBoundingClientRect().top - top,
+    const contentTop = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
+    const footerTop = document.querySelector('.echo-player').getBoundingClientRect().top;
+    const first = selected[0].getBoundingClientRect(), last = selected.at(-1).getBoundingClientRect();
+    return { rowIndices: selected.map(el => el.dataset.rowIndex), viewport: [innerWidth, innerHeight], contentTop, footerTop,
+      selectedTop: first.top, selectedBottom: last.bottom, selectedCenter: (first.top + last.bottom) / 2,
+      usableCenter: (contentTop + 24 + footerTop - 24) / 2,
       previousBottom: selected[0].closest('li').previousElementSibling?.getBoundingClientRect().bottom ?? null, scrollY };
   });
   (report.topFollow ??= []).push({ name, ...geometry }); check(name);
@@ -229,6 +237,20 @@ try {
     await panel.locator('.echo-list > li').first().waitFor(); await panel.setViewportSize({ width: 430, height: 900 });
     const button = panel.locator('#btn-sentence-shadowing'); await button.waitFor();
     const microphone = panel.getByRole('button', { name: '跟读模式', exact: true });
+    if (platform === 'bilibili') {
+      const welcome = panel.locator('.ylh-tour-welcome'); await welcome.waitFor();
+      check('bilibili: first loaded transcript opens the localized guided tour',
+        (await welcome.textContent()).includes('欢迎使用 Video Language Helper') && (await welcome.textContent()).includes('第 1 步，共 9'));
+      await screenshot('onboarding-welcome-bilibili-simulated-test-browser.png');
+      await panel.getByRole('button', { name: '跳过引导', exact: true }).click(); await welcome.waitFor({ state: 'detached' });
+      await panel.waitForFunction(async () => {
+        const value = (await chrome.storage.local.get('ylh-guided-tours-v1'))['ylh-guided-tours-v1']; return value?.welcome === true;
+      });
+      check('bilibili: closing onboarding persists completion without blocking controls');
+    } else {
+      await panel.waitForTimeout(1400);
+      check('youtube: completed welcome tour does not reopen after panel reload', await panel.locator('.ylh-tour-welcome').count() === 0);
+    }
     await panel.evaluate(() => {
       window.__microphoneRequests = 0;
       const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -245,12 +267,24 @@ try {
       });
     });
     await button.click(); await panel.locator('.echo-shell[data-play-mode="shadowing"]').waitFor();
+    if (platform === 'bilibili') {
+      const shadowingTour = panel.locator('.ylh-tour-shadowing'); await shadowingTour.waitFor();
+      check('bilibili: first E-mode activation opens a separate shadowing tour', (await shadowingTour.textContent()).includes('逐句跟读已开启'));
+      await panel.getByRole('button', { name: '跳过引导', exact: true }).click(); await shadowingTour.waitFor({ state: 'detached' });
+    }
     check(`${platform}: sentence-only shadowing has no recording panel or dictation control`,
       await panel.getByRole('region', { name: '跟读练习', exact: true }).count() === 0
       && await panel.getByRole('button', { name: '听写模式', exact: true }).count() === 0
       && await microphone.getAttribute('aria-pressed') === 'false');
-    check(`${platform}: real click enables shadowing without alert`, await button.getAttribute('aria-pressed') === 'true'
-      && (await button.innerText()) === '逐句跟读' && (await panel.locator('.echo-toast').textContent()).includes('逐句跟读已开启'));
+    const shadowingButtonState = await button.evaluate(element => ({
+      label: element.getAttribute('aria-label'),
+      pressed: element.getAttribute('aria-pressed'),
+      shortcut: element.querySelector('kbd')?.textContent?.trim(),
+      text: element.textContent?.replace(/\s+/g, '').trim(),
+    }));
+    check(`${platform}: real click enables shadowing without alert`, shadowingButtonState.pressed === 'true'
+      && shadowingButtonState.label === '切换逐句跟读' && shadowingButtonState.shortcut === 'E'
+      && shadowingButtonState.text === '逐句跟读E' && (await panel.locator('.echo-toast').textContent()).includes('逐句跟读已开启'));
     report[`${platform}Cycles`] = [];
     // No clicks, key presses or media-clock writes during these two cycles.
     for (const [index, row] of rows.slice(0, 2).entries()) {
@@ -275,7 +309,7 @@ try {
     check(`${platform}: two sentence cycles never request a microphone`, await panel.evaluate(() => window.__microphoneRequests) === 0);
     await panel.locator('.echo-cue.selected').filter({ hasText: rows[2].content }).waitFor();
     check(`${platform}: sidebar selection follows the third sentence without user input`);
-    await assertTopFollow(`${platform}: automatically highlighted third sentence has 32px top breathing room`);
+    await assertSmartFollow(`${platform}: automatically highlighted third sentence is centered with surrounding context`);
     await panel.getByRole('button', { name: '暂停', exact: true }).waitFor();
     await panel.locator('.echo-shell').evaluate(el => el.scrollIntoView({ block: 'start' }));
     const name = `shadowing-${platform}-simulated-test-browser.png`;
@@ -288,6 +322,15 @@ try {
     check(`${platform}: footer play cancels shadowing and resumes continuous playback`, await button.getAttribute('aria-pressed') === 'false');
     await page.locator('#movie_player').focus();
     check(`${platform}: keyboard focus is on the page player`, await page.locator('#movie_player').evaluate(el => document.activeElement === el));
+    report[`${platform}SpacePreflight`] = await panel.locator('.echo-shell').evaluate(element => ({
+      playMode: element.getAttribute('data-play-mode'),
+      playing: element.getAttribute('data-playing'),
+      tourActive: element.getAttribute('data-tour-active'),
+      driverPopoverCount: document.querySelectorAll('.driver-popover').length,
+    }));
+    check(`${platform}: completed guided tour releases keyboard controls`,
+      report[`${platform}SpacePreflight`].tourActive === 'false'
+      && report[`${platform}SpacePreflight`].driverPopoverCount === 0);
     report[`${platform}SpaceCycles`] = [];
     const mediaState = () => page.locator('video').evaluate(v => ({ paused: v.paused, time: v.currentTime,
       wallMs: performance.now(), nativeSpaceKeyups: window.__nativeSpaceKeyups ?? 0 }));
@@ -341,10 +384,15 @@ try {
       && await microphone.getAttribute('aria-pressed') === 'false');
     await microphone.click(); await panel.locator('.echo-shell[data-play-mode="practice"]').waitFor();
     await panel.getByRole('region', { name: '跟读练习', exact: true }).waitFor();
+    if (platform === 'bilibili') {
+      const practiceTour = panel.locator('.ylh-tour-practice'); await practiceTour.waitFor();
+      check('bilibili: first F-mode activation opens a separate microphone-practice tour', (await practiceTour.textContent()).includes('麦克风跟读练习已开启'));
+      await panel.getByRole('button', { name: '跳过引导', exact: true }).click(); await practiceTour.waitFor({ state: 'detached' });
+    }
     check(`${platform}: microphone opens separate recording practice, not sentence shadowing`,
       await button.getAttribute('aria-pressed') === 'false' && await microphone.getAttribute('aria-pressed') === 'true');
     await panel.locator('.echo-cue').first().click();
-    await assertTopFollow(`${platform}: first sentence has top breathing room without half-screen padding`);
+    await assertSmartFollow(`${platform}: first sentence keeps a compact top safe area`);
     await page.waitForFunction(() => { const v = document.querySelector('video'); return v.paused && Math.abs(v.currentTime - 3) < .02; });
     await page.waitForTimeout(3_100);
     check(`${platform}: recording practice stays on its sentence without automatic next`,
@@ -415,11 +463,11 @@ try {
     await panel.getByRole('button', { name: '暂停录音回放', exact: true }).click();
     await panel.getByRole('slider', { name: '录音播放进度' }).fill('0.5');
     check(`${platform}: recording progress seeks the native audio`, await audio.evaluate(el => Math.abs(el.currentTime - .5) < .05));
-    await assertTopFollow(`${platform}: recording changes keep the highlight top-aligned`);
+    await assertSmartFollow(`${platform}: recording changes keep the highlight safely aligned`);
     await panel.getByRole('button', { name: '选择录音', exact: true }).click();
     await screenshot(`recording-menu-${platform}-simulated-test-browser.png`);
     await panel.setViewportSize({ width: 320, height: 760 });
-    await assertTopFollow(`${platform}: narrow recording view retains the highlight breathing room`);
+    await assertSmartFollow(`${platform}: narrow recording view retains the highlight breathing room`);
     const narrowFits = () => {
       const boxes = [...document.querySelector('.practice-playback-row').children].map(el => el.getBoundingClientRect());
       const menu = document.querySelector('.practice-recordings-menu').getBoundingClientRect();
@@ -465,9 +513,13 @@ try {
     const help = panel.getByRole('button', { name: '如何读懂音高图表', exact: true });
     await help.hover();
     const helpBubble = panel.getByRole('tooltip').filter({ hasText: '如何读懂图表' }); await helpBubble.waitFor();
-    check(`${platform}: chart hover has the reference explanation and black/white styling`,
+    check(`${platform}: chart hover has the reference explanation, high contrast and viewport collision safety`,
       (await helpBubble.innerText()).includes('底部阴影区域表示音量强度，空白处代表停顿')
-      && await helpBubble.evaluate(el => getComputedStyle(el).backgroundColor === 'rgb(9, 9, 9)' && getComputedStyle(el).color === 'rgb(255, 255, 255)'));
+      && await helpBubble.evaluate(el => {
+        const style = getComputedStyle(el), bounds = el.getBoundingClientRect();
+        return style.backgroundColor === 'rgb(23, 32, 43)' && style.color === 'rgb(255, 255, 255)'
+          && bounds.left >= 8 && bounds.right <= innerWidth - 8 && bounds.top >= 8 && bounds.bottom <= innerHeight - 8;
+      }));
     check(`${platform}: complete pitch card and recording controls are visible for screenshot review`, await panel.locator('.practice-card').evaluate(el => {
       const card = el.getBoundingClientRect();
       return card.top >= document.querySelector('.echo-toast').getBoundingClientRect().bottom
@@ -539,22 +591,31 @@ try {
       await panel.getByRole('button', { name: '录音 #3', exact: true }).getAttribute('aria-pressed') === 'true'
       && await panel.locator('.practice-recording-choice').count() === 1);
     await panel.keyboard.press('Escape');
-    await panel.locator('.echo-cue').last().click(); await assertTopFollow(`${platform}: last sentence aligns below the top with trailing scroll space`);
+    await panel.locator('.echo-cue').last().click(); await assertSmartFollow(`${platform}: last sentence centers with trailing scroll space`);
     await panel.getByRole('button', { name: '向前扩展片段', exact: true }).click();
-    await assertTopFollow(`${platform}: multi-sentence practice range keeps its first sentence at the top`);
+    await assertSmartFollow(`${platform}: multi-sentence practice range centers as one visible block`);
     await panel.getByRole('button', { name: '收缩片段开头', exact: true }).click();
-    await assertTopFollow(`${platform}: contracted practice range re-aligns below the top`);
+    await assertSmartFollow(`${platform}: contracted practice range re-centers as one block`);
     await panel.setViewportSize({ width: 320, height: 760 });
-    await assertTopFollow(`${platform}: narrow-sidebar wrapping preserves breathing room`);
-    check(`${platform}: narrow footer controls do not overlap or leave the viewport`, await panel.locator('.echo-player').evaluate(footer => {
-      const boxes = [...footer.querySelectorAll('button')].map(el => el.getBoundingClientRect());
-      return boxes.every(box => box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight)
-        && boxes.every((box, i) => boxes.slice(i + 1).every(other => box.right <= other.left + 1 || other.right <= box.left + 1));
-    }));
+    await assertSmartFollow(`${platform}: narrow-sidebar wrapping preserves safe smart alignment`);
+    const narrowFooterGeometry = await panel.locator('.echo-player').evaluate(footer => [...footer.querySelectorAll('button')].map(button => ({
+      name: button.getAttribute('aria-label'), box: button.getBoundingClientRect().toJSON(),
+      children: [...button.children].map(child => ({ tag: child.tagName, text: child.textContent?.trim(), box: child.getBoundingClientRect().toJSON() }))
+        .filter(item => item.box.width > 0 && item.box.height > 0),
+    })));
+    (report.narrowFooterGeometry ??= {})[platform] = narrowFooterGeometry;
+    check(`${platform}: narrow footer controls do not overlap or leave the viewport`, narrowFooterGeometry.every(button => {
+      const box = button.box;
+      return box.left >= 0 && box.right <= 320 && box.top >= 0 && box.bottom <= 760
+        && button.children.every(child => child.box.left >= box.left - 1 && child.box.right <= box.right + 1
+          && child.box.top >= box.top - 1 && child.box.bottom <= box.bottom + 1);
+    }) && narrowFooterGeometry.every((button, i) => narrowFooterGeometry.slice(i + 1).every(other =>
+      button.box.right <= other.box.left + 1 || other.box.right <= button.box.left + 1
+      || button.box.bottom <= other.box.top + 1 || other.box.bottom <= button.box.top + 1)));
     await microphone.hover();
     await screenshot(`narrow-top-follow-${platform}-simulated-test-browser.png`);
     await panel.setViewportSize({ width: 430, height: 900 });
-    await assertTopFollow(`${platform}: restored sidebar size preserves breathing room`);
+    await assertSmartFollow(`${platform}: restored sidebar size preserves smart alignment`);
     await panel.mouse.wheel(0, -120); await panel.waitForTimeout(200);
     const manualScroll = await panel.evaluate(() => scrollY); await panel.waitForTimeout(350);
     check(`${platform}: media updates do not fight manual scrolling`, Math.abs(await panel.evaluate(() => scrollY) - manualScroll) < 2);

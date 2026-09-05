@@ -69,8 +69,12 @@ export async function verifyAssessment({ panel, page, platform, fixture, check, 
   await panel.locator('[data-assessment-trigger]').waitFor();
   await panel.locator('[data-assessment-trigger]').hover();
   await panel.getByRole('tooltip').filter({ hasText: '评估发音 (V)' }).waitFor();
-  check(label('sparkles button beside recording play exposes V hover help'), await panel.locator('[data-assessment-trigger]').evaluate(el =>
-    el.parentElement.previousElementSibling?.classList.contains('practice-playback-toggle')));
+  check(label('sparkles button beside recording play exposes V hover help'), await panel.locator('[data-assessment-trigger]').evaluate(el => {
+    const play = el.previousElementSibling, assessRect = el.getBoundingClientRect(), playRect = play?.getBoundingClientRect();
+    return play?.classList.contains('practice-playback-toggle') && !!playRect
+      && playRect.right <= assessRect.left && assessRect.left - playRect.right <= 12
+      && playRect.top < assessRect.bottom && playRect.bottom > assessRect.top;
+  }));
   await screenshot(`assessment-button-${platform}-simulated-test-browser.png`);
   await page.getByLabel('视频页面测试输入框').fill(''); await page.getByLabel('视频页面测试输入框').press('v');
   check(label('V stays text in page input'), await page.getByLabel('视频页面测试输入框').inputValue() === 'v' && count() === initialCount);

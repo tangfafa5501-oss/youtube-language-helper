@@ -109,7 +109,7 @@ export default function ShadowingExerciseCard({ segment, dictation, currentTimeM
   };
   const progress = currentTimeMs !== null && currentTimeMs >= segment.startMs && currentTimeMs <= segment.endMs
     ? (currentTimeMs - segment.startMs) / (segment.endMs - segment.startMs) * 100 : null;
-  return <div className="practice-card" data-practice-key={key}>
+  return <div className="practice-card" data-practice-key={key} data-tour="practice-card">
     {dictation && <DictationCard key={liveKey} segment={segment} registerFocus={callback => { focus.current = callback; }}/>}
     <section aria-label="跟读练习">
       <div className="practice-line practice-heading"><h3><Mic/>跟读练习</h3><span className="practice-duration"><Clock/>{durationText(segment.endMs - segment.startMs)}</span></div>

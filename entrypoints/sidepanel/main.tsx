@@ -5,11 +5,12 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Popover from '@radix-ui/react-popover';
 import * as Select from '@radix-ui/react-select';
 import * as Slider from '@radix-ui/react-slider';
-import { BookOpen, Check, ChevronDown, CircleHelp, Keyboard, Languages, Mic, MoreVertical,
+import { BookOpen, Check, ChevronDown, CircleHelp, Ear, Keyboard, Languages, Mic, MoreVertical,
   ArrowUp, ArrowDown, Minus, Plus, Pause, Play, RefreshCw, Settings, SkipBack, SkipForward, X } from '../../components/icons';
 import { SettingsView } from '../../components/settings-view';
 import { HoverHint } from '../../components/hover-hint';
 import { useCueFollow } from '../../components/use-cue-follow';
+import { useGuidedTours } from '../../components/use-guided-tours';
 import { adjacentPlaybackRate, PLAYBACK_RATES, PORT, emptyState, type PlayMode, type State, type Track } from '../../lib/protocol';
 import { connectPanel } from '../../lib/panel-connection';
 import { record } from '../../lib/captions';
@@ -67,14 +68,6 @@ const SHORTCUT_SECTIONS = [
   ] },
 ] as const;
 
-const GUIDE_STEPS = [
-  ['选择字幕', '顶部左侧分别选择主字幕和第二字幕。第二字幕只读取视频实际提供的轨道，不自动翻译。'],
-  ['选择语段', '点击任一语段即可定位。A、S、D 分别对应上一句、重播和下一句。'],
-  ['逐句跟读', '按 E 或逐句跟读按钮开启。每句播完停顿本句同等时长，再自动播放下一句，循环往下；按播放或空格恢复普通连续播放。'],
-  ['播放速度', '点击底部倍速按钮打开滑块；Shift 加逗号或句号也可减速、加速。'],
-  ['录音与听写', '点击右侧麦克风或按 F 单独开启跟读模式，片段播完暂停，按 S 重播，再按 R 录音、H 听写。此模式与 E 逐句等时停顿独立；展开音高曲线可比较原声和录音的语调。'],
-] as const;
-
 function TrackSelect({ label, value, disabled, placeholder, tracks, isBilibili, onChange }: { label: string; value: string;
   disabled?: boolean; placeholder: string; tracks: readonly Track[]; isBilibili: boolean; onChange: (value: string) => void }) {
   return <Select.Root value={value} onValueChange={onChange} disabled={disabled}>
@@ -93,7 +86,7 @@ const EchoCueRow = React.memo(function EchoCueRow({ item, active, index, onActiv
   const [revealed, setRevealed] = useState(false);
   const obscure = hidden && !revealed;
   const playable = item.startMs !== null && item.endMs !== null && item.endMs > item.startMs;
-  return <li><button data-phrase-id={item.id} data-row-index={index} className={`echo-cue ${active ? 'selected' : ''}`}
+  return <li><button data-phrase-id={item.id} data-row-index={index} data-tour={active ? 'active-cue' : undefined} className={`echo-cue ${active ? 'selected' : ''}`}
     title={`${timestamp(item.startMs)} → ${timestamp(item.endMs)}`} disabled={!playable} aria-current={active ? 'true' : undefined}
     onClick={() => onActivate(index)}>
     <span className="echo-time">{compactTimestamp(item.startMs)}</span>
@@ -116,17 +109,6 @@ function ShortcutDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
   </Dialog.Portal></Dialog.Root>;
 }
 
-function GuideDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  return <Dialog.Root open={open} onOpenChange={onOpenChange}><Dialog.Portal>
-    <Dialog.Overlay className="echo-dialog-overlay"/><Dialog.Content className="echo-dialog-content echo-guide-card">
-      <div className="echo-dialog-header"><Dialog.Title>使用引导</Dialog.Title><Dialog.Close aria-label="关闭"><X/></Dialog.Close></div>
-      <Dialog.Description className="sr-only">Video Language Helper 使用步骤</Dialog.Description>
-      <ol>{GUIDE_STEPS.map(([title, body], index) => <li key={title}><span>{index + 1}</span><div><h2>{title}</h2><p>{body}</p></div></li>)}</ol>
-      <Dialog.Close className="echo-dialog-done">开始使用</Dialog.Close>
-    </Dialog.Content>
-  </Dialog.Portal></Dialog.Root>;
-}
-
 function App() {
   const [state, setState] = useState<State>(emptyState);
   const [settings, setSettings] = useState<PublicSettings>(defaultSettings);
@@ -143,7 +125,6 @@ function App() {
   const exerciseRef = useRef<ExerciseHandle>(null);
   const [currentTimeMs, setCurrentTimeMs] = useState<number | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [guideOpen, setGuideOpen] = useState(false);
   const autoRequestedSessionRef = useRef('');
   const desiredSecondaryRef = useRef<string | null>(null);
   const connectionRef = useRef<ReturnType<typeof connectPanel> | null>(null);
@@ -237,6 +218,7 @@ function App() {
     const base = phraseRows.map(phrase => ({ ...phrase, phraseId: phrase.id }));
     return base.map(row => ({ ...row, secondaryText: secondaryTextForRange(state.secondaryCues ?? [], row.startMs, row.endMs) }));
   }, [phraseRows, state.secondaryCues]);
+  const { tourActive, startTour, scheduleModeTour } = useGuidedTours(view === 'reader' && state.status === 'loaded' && echoRows.length > 0);
 
   useEffect(() => {
     if (!video || isBilibili || state.status !== 'ready' || !preferredTrack) return;
@@ -316,20 +298,22 @@ function App() {
       : mode === 'shadowing' ? '逐句跟读已开启 (E)' : mode === 'practice' ? '跟读模式已开启：录音与听写练习' : '自动连续播放已开启 (E)');
   };
   const toggleShadowing = () => {
-    if (playMode === 'shadowing') { setDictation(false); setPlaybackMode('auto'); return; }
+    if (playMode === 'shadowing') { scheduleModeTour(null); setDictation(false); setPlaybackMode('auto'); return; }
     const index = navigationIndex >= 0 ? navigationIndex : nextIndex;
     if (index >= 0) {
       setPlayMode('shadowing'); activateEchoRow(index, 'shadowing');
       setPlayback('逐句跟读已开启 (E)');
     } else setPlaybackMode('shadowing');
+    scheduleModeTour('shadowing');
   };
   const togglePracticeMode = () => {
-    if (playMode === 'practice') { setDictation(false); setPlaybackMode('auto'); return; }
+    if (playMode === 'practice') { scheduleModeTour(null); setDictation(false); setPlaybackMode('auto'); return; }
     const index = navigationIndex >= 0 ? navigationIndex : nextIndex;
     if (index >= 0) {
       activateEchoRow(index, 'practice');
       setPlayback('跟读模式已开启：录音与听写练习');
     } else setPlaybackMode('practice');
+    scheduleModeTour('practice');
   };
   const setPlaybackRate = (next: number) => {
     if (next === rate || !(PLAYBACK_RATES as readonly number[]).includes(next)) return;
@@ -368,7 +352,7 @@ function App() {
   }, [echoRows.length, state.status, state.nativeTimeline, video?.videoId]);
 
   shortcutHandlerRef.current = (action, repeat = false) => {
-    if (view !== 'reader' || shortcutsOpen || guideOpen || state.status !== 'loaded') return false;
+    if (view !== 'reader' || shortcutsOpen || tourActive || state.status !== 'loaded') return false;
     if (repeat) return action === 'play';
     if (action === 'help') setShortcutsOpen(true);
     else if (action === 'slower') changeRate(-1);
@@ -399,8 +383,8 @@ function App() {
   if (view === 'settings') return <SettingsView onBack={() => setView('reader')} onSettings={next => { setSettings(next); applyTheme(next.theme); }}/>
 
   if (echoRows.length && state.status === 'loaded') return <main className="echo-shell" data-display-mode="phrases"
-    data-play-mode={playMode} data-playing={playing}>
-    <header className="echo-toolbar">
+    data-play-mode={playMode} data-playing={playing} data-tour-active={tourActive}>
+    <header className="echo-toolbar" data-tour="subtitle-selectors">
       <TrackSelect label="主字幕" value={primaryTrackId} disabled={primaryBusy || !primaryTrackId} placeholder="主字幕" tracks={video?.tracks ?? []} isBilibili={isBilibili}
         onChange={value => selectTracks(value, secondaryTrackId === 'none' || value === secondaryTrackId ? null : secondaryTrackId)}/>
       <Select.Root value={secondaryTrackId} disabled={primaryBusy || secondaryBusy} onValueChange={value => selectTracks(primaryTrackId, value === 'none' ? null : value)}>
@@ -412,10 +396,10 @@ function App() {
       </Select.Root>
       <span className="echo-toolbar-spacer"/>
       <button className="echo-icon" aria-label="键盘快捷键" title="键盘快捷键" onClick={() => setShortcutsOpen(true)}><Keyboard/></button>
-      <DropdownMenu.Root><DropdownMenu.Trigger asChild><button className="echo-icon" aria-label="更多选项" title="更多选项"><MoreVertical/></button></DropdownMenu.Trigger>
+      <DropdownMenu.Root><DropdownMenu.Trigger asChild><button className="echo-icon" data-tour="actions" aria-label="更多选项" title="更多选项"><MoreVertical/></button></DropdownMenu.Trigger>
         <DropdownMenu.Portal><DropdownMenu.Content className="echo-menu-content" sideOffset={6} align="end">
           <DropdownMenu.Item className="echo-menu-item" onSelect={refreshCaptions}><RefreshCw/><span>重新获取字幕</span></DropdownMenu.Item>
-          <DropdownMenu.Item className="echo-menu-item" onSelect={() => setGuideOpen(true)}><CircleHelp/><span>显示引导</span></DropdownMenu.Item>
+          <DropdownMenu.Item className="echo-menu-item" onSelect={() => void startTour('welcome', true)}><CircleHelp/><span>显示引导</span></DropdownMenu.Item>
           <DropdownMenu.Separator className="echo-menu-separator"/>
           <DropdownMenu.Item className="echo-menu-item" onSelect={() => setView('settings')}><Settings/><span>设置</span></DropdownMenu.Item>
         </DropdownMenu.Content></DropdownMenu.Portal>
@@ -429,7 +413,7 @@ function App() {
     <ol className="echo-list">{echoRows.map((item, index) => <EchoCueRow key={item.id} item={item} index={index}
       active={playMode === 'practice' ? index >= navigationIndex && index <= endIndex : activeId === item.id} hidden={playMode === 'practice' && dictation} onActivate={activateEchoRow}>
       {playMode === 'practice' && index === endIndex && practiceSegment && <>
-        <div className="echo-segment-controls" aria-label="调整练习片段">
+        <div className="echo-segment-controls" data-tour="segment-controls" aria-label="调整练习片段">
           <button title="向前扩展 ([)" aria-label="向前扩展片段" disabled={navigationIndex <= 0} onClick={() => resizePractice('start', -1)}><ArrowUp/><Plus/></button>
           <button title="收缩开头 (Shift+[)" aria-label="收缩片段开头" disabled={endIndex <= navigationIndex} onClick={() => resizePractice('start', 1)}><ArrowUp/><Minus/></button>
           <button title="收缩结尾 (Shift+])" aria-label="收缩片段结尾" disabled={endIndex <= navigationIndex} onClick={() => resizePractice('end', -1)}><ArrowDown/><Minus/></button>
@@ -441,31 +425,27 @@ function App() {
       </>}
     </EchoCueRow>)}</ol>
     <footer className="echo-player">
-      <button aria-label="上一句" title="上一句 (A)" disabled={previousIndex < 0} onClick={() => activateEchoRow(previousIndex, 'previous')}><SkipBack/></button>
+      <button className="echo-transport-control echo-previous" aria-label="上一句" title="上一句 (A)" disabled={previousIndex < 0} onClick={() => activateEchoRow(previousIndex, 'previous')}><SkipBack/><span>上一句</span><kbd>A</kbd></button>
       <button className="echo-play" aria-label={playing ? '暂停' : '播放'}
-        title="播放/暂停 (Space)" onClick={togglePlayback}>
-        {playing ? <Pause/> : <Play/>}
+        data-tour="transport" title="播放/暂停 (Space)" onClick={togglePlayback}>
+        {playing ? <Pause/> : <Play/>}<span>播放/暂停</span><kbd>Space</kbd>
       </button>
-      <button aria-label="下一句" title="下一句 (D)" disabled={nextIndex < 0} onClick={() => activateEchoRow(nextIndex, 'next')}><SkipForward/></button>
+      <button className="echo-transport-control echo-next" aria-label="下一句" title="下一句 (D)" disabled={nextIndex < 0} onClick={() => activateEchoRow(nextIndex, 'next')}><SkipForward/><span>下一句</span><kbd>D</kbd></button>
       <button
         id="btn-sentence-shadowing"
         type="button"
+        className="echo-mode-control shadowing-mode"
+        data-tour="shadowing"
         aria-label="切换逐句跟读"
         aria-pressed={playMode === 'shadowing'}
         aria-keyshortcuts="E"
         title={playMode === 'shadowing' ? '关闭逐句跟读 (E)' : '开启逐句跟读 (E)'}
-        style={{
-          border: '1px solid #e28743', color: '#b85d19', background: playMode === 'shadowing' ? '#fee3a8' : '#fff7ed',
-          padding: '2px 8px', borderRadius: 6, fontSize: 12, cursor: 'pointer', margin: '0 4px',
-          flex: '0 0 auto', width: 'auto', whiteSpace: 'nowrap',
-        }}
         onClick={toggleShadowing}
       >
-        逐句跟读
+        <Ear/><span>逐句跟读</span><kbd>E</kbd>
       </button>
-      <button aria-label="重新播放当前句" title="重播当前句 (S)" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex, 'replay')}><RefreshCw/></button>
-      <span className="echo-player-spacer"/>
-      <Popover.Root><Popover.Trigger asChild><button className="echo-rate" aria-label="播放速度" title="播放速度">{rate}x</button></Popover.Trigger>
+      <button className="echo-mode-control echo-replay" data-tour="replay" aria-label="重新播放当前句" title="重播当前句 (S)" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex, 'replay')}><RefreshCw/><span>重播</span><kbd>S</kbd></button>
+      <Popover.Root><Popover.Trigger asChild><button className="echo-mode-control echo-rate" data-tour="speed" aria-label="播放速度" title="播放速度"><strong>{rate}x</strong><span>播放速度</span></button></Popover.Trigger>
         <Popover.Portal><Popover.Content className="echo-rate-content" side="top" sideOffset={10} align="end">
           <div className="echo-rate-heading"><strong>播放速度</strong><b>{rate}x</b></div>
           <Slider.Root className="echo-slider" min={0} max={PLAYBACK_RATES.length - 1} step={1}
@@ -477,14 +457,14 @@ function App() {
           <Popover.Arrow className="echo-popover-arrow"/>
         </Popover.Content></Popover.Portal>
       </Popover.Root>
-      {playMode === 'practice' && <button className={`practice-mode ${dictation ? 'active' : ''}`} aria-label="听写模式" aria-pressed={dictation} title="听写模式 (H)" onClick={toggleDictation}><BookOpen/></button>}
+      {playMode === 'practice' && <button className={`echo-mode-control dictation-mode ${dictation ? 'active' : ''}`} data-tour="dictation" aria-label="听写模式" aria-pressed={dictation} title="听写模式 (H)" onClick={toggleDictation}><BookOpen/><span>听写</span><kbd>H</kbd></button>}
       <HoverHint align="end" content={playMode === 'practice'
         ? '跟读模式已开启—片段播放一次后暂停，按 S 重播；F 关闭。'
         : '开启跟读模式—片段播放一次后暂停，可录音与听写 (F)。'}>
-        <button className={`practice-mode ${playMode === 'practice' ? 'active' : ''}`} data-play-mode-control="practice" aria-label="跟读模式" aria-keyshortcuts="F" aria-pressed={playMode === 'practice'} onClick={togglePracticeMode}><Mic/></button>
+        <button className={`echo-mode-control practice-mode ${playMode === 'practice' ? 'active' : ''}`} data-tour="practice" data-play-mode-control="practice" aria-label="跟读模式" aria-keyshortcuts="F" aria-pressed={playMode === 'practice'} onClick={togglePracticeMode}><Mic/><span>跟读练习</span><kbd>F</kbd></button>
       </HoverHint>
     </footer>
-    <ShortcutDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}/><GuideDialog open={guideOpen} onOpenChange={setGuideOpen}/>
+    <ShortcutDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}/>
   </main>;
 
   const fetching = primaryBusy || Boolean(video && !isBilibili && state.status === 'ready');
