@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DriveStep, Driver } from 'driver.js';
-import type { PlayMode } from '../lib/protocol';
 
 export type GuidedTourKind = 'welcome' | 'shadowing' | 'practice';
 type CompletionState = Record<GuidedTourKind, boolean>;
@@ -40,10 +39,11 @@ export const GUIDED_TOUR_STEPS: Record<GuidedTourKind, DriveStep[]> = {
   welcome: welcomeSteps, shadowing: shadowingSteps, practice: practiceSteps,
 };
 
-export function useGuidedTours(ready: boolean, playMode: PlayMode) {
+export function useGuidedTours(ready: boolean) {
   const [completed, setCompleted] = useState<CompletionState | null>(null);
   const [active, setActive] = useState(false);
-  const driverRef = useRef<Driver | null>(null), previousMode = useRef<PlayMode>(playMode);
+  const driverRef = useRef<Driver | null>(null);
+  const scheduledTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -52,7 +52,11 @@ export function useGuidedTours(ready: boolean, playMode: PlayMode) {
       const value = stored[GUIDED_TOUR_STORAGE_KEY];
       setCompleted(value && typeof value === 'object' ? { ...EMPTY_TOUR_STATE, ...value } : EMPTY_TOUR_STATE);
     }).catch(() => { if (mounted) setCompleted(EMPTY_TOUR_STATE); });
-    return () => { mounted = false; driverRef.current?.destroy(); };
+    return () => {
+      mounted = false;
+      if (scheduledTimerRef.current) clearTimeout(scheduledTimerRef.current);
+      driverRef.current?.destroy();
+    };
   }, []);
 
   const start = useCallback(async (kind: GuidedTourKind, force = false) => {
@@ -60,7 +64,10 @@ export function useGuidedTours(ready: boolean, playMode: PlayMode) {
     setActive(true);
     try {
       const [{ driver }] = await Promise.all([import('driver.js'), import('driver.js/dist/driver.css')]);
+      let finished = false;
       const finish = () => {
+        if (finished) return;
+        finished = true;
         driverRef.current = null; setActive(false);
         setCompleted(previous => {
           const next = { ...(previous ?? EMPTY_TOUR_STATE), [kind]: true };
@@ -68,7 +75,8 @@ export function useGuidedTours(ready: boolean, playMode: PlayMode) {
           return next;
         });
       };
-      const instance = driver({
+      let instance: Driver;
+      instance = driver({
         steps: GUIDED_TOUR_STEPS[kind], animate: true, smoothScroll: true, allowClose: true,
         allowKeyboardControl: true, disableActiveInteraction: true, skipMissingElement: true,
         waitForElement: 1200, overlayColor: '#102332', overlayOpacity: .42, stagePadding: 7, stageRadius: 13,
@@ -76,6 +84,7 @@ export function useGuidedTours(ready: boolean, playMode: PlayMode) {
         nextBtnText: '下一步', prevBtnText: '上一步', doneBtnText: '完成', progressText: '第 {{current}} 步，共 {{total}}',
         popoverClass: `ylh-tour-popover ylh-tour-${kind}`,
         onPopoverRender: popover => { popover.closeButton.setAttribute('aria-label', '跳过引导'); },
+        onDestroyStarted: () => { finish(); instance.destroy(); },
         onDestroyed: finish,
       });
       driverRef.current = instance; instance.drive();
@@ -90,15 +99,15 @@ export function useGuidedTours(ready: boolean, playMode: PlayMode) {
     return () => clearTimeout(timer);
   }, [active, completed, ready, start]);
 
-  useEffect(() => {
-    const before = previousMode.current;
-    if (before === playMode || !ready || !completed || active) return;
-    previousMode.current = playMode;
-    const kind = playMode === 'shadowing' ? 'shadowing' : playMode === 'practice' ? 'practice' : null;
-    if (!kind || completed[kind]) return;
-    const timer = setTimeout(() => void start(kind), 500);
-    return () => clearTimeout(timer);
-  }, [active, completed, playMode, ready, start]);
+  const scheduleModeTour = useCallback((kind: Exclude<GuidedTourKind, 'welcome'> | null) => {
+    if (scheduledTimerRef.current) clearTimeout(scheduledTimerRef.current);
+    scheduledTimerRef.current = null;
+    if (!kind) return;
+    scheduledTimerRef.current = setTimeout(() => {
+      scheduledTimerRef.current = null;
+      void start(kind);
+    }, 500);
+  }, [start]);
 
-  return { tourActive: active, startTour: start };
+  return { tourActive: active, startTour: start, scheduleModeTour };
 }

@@ -19,7 +19,7 @@ export function useCueFollow(highlightKey: string) {
       const top = (toolbar?.getBoundingClientRect().height ?? 0) + (banner?.getBoundingClientRect().height ?? 0);
       const bottom = innerHeight - (footer?.getBoundingClientRect().height ?? 0);
       const gap = 24, usableTop = top + gap, usableBottom = bottom - gap;
-      const first = selected[0]!.getBoundingClientRect(), last = selected[selected.length - 1]!.getBoundingClientRect();
+      let first = selected[0]!.getBoundingClientRect(), last = selected[selected.length - 1]!.getBoundingClientRect();
       const blockHeight = last.bottom - first.top, available = Math.max(1, usableBottom - usableTop);
       // The first few single rows stay naturally near the top. Later rows and
       // multi-row ranges are centered as a block when they fit in the safe area.
@@ -28,7 +28,17 @@ export function useCueFollow(highlightKey: string) {
       const targetTop = keepNearTop || blockHeight >= available
         ? usableTop : usableTop + (available - blockHeight) / 2;
       const trailing = `${Math.max(72, available)}px`;
-      if (list.style.paddingTop !== '0px') list.style.paddingTop = '0px';
+      // A short transcript may not have enough document height above a later row
+      // to scroll it down to the center. Add only the missing top space in that
+      // case; long transcripts continue to use normal document scrolling.
+      const currentTopPadding = Number.parseFloat(list.style.paddingTop) || 0;
+      const naturalTop = first.top - currentTopPadding;
+      const leading = `${Math.max(0, targetTop - naturalTop)}px`;
+      if (list.style.paddingTop !== leading) {
+        list.style.paddingTop = leading;
+        first = selected[0]!.getBoundingClientRect();
+        last = selected[selected.length - 1]!.getBoundingClientRect();
+      }
       if (list.style.paddingBottom !== trailing) list.style.paddingBottom = trailing;
       const delta = first.top - targetTop;
       if (Math.abs(delta) > 1) window.scrollTo({ top: scrollY + delta, behavior: 'instant' });

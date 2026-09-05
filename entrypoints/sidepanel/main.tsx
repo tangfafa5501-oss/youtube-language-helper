@@ -218,7 +218,7 @@ function App() {
     const base = phraseRows.map(phrase => ({ ...phrase, phraseId: phrase.id }));
     return base.map(row => ({ ...row, secondaryText: secondaryTextForRange(state.secondaryCues ?? [], row.startMs, row.endMs) }));
   }, [phraseRows, state.secondaryCues]);
-  const { tourActive, startTour } = useGuidedTours(view === 'reader' && state.status === 'loaded' && echoRows.length > 0, playMode);
+  const { tourActive, startTour, scheduleModeTour } = useGuidedTours(view === 'reader' && state.status === 'loaded' && echoRows.length > 0);
 
   useEffect(() => {
     if (!video || isBilibili || state.status !== 'ready' || !preferredTrack) return;
@@ -298,20 +298,22 @@ function App() {
       : mode === 'shadowing' ? '逐句跟读已开启 (E)' : mode === 'practice' ? '跟读模式已开启：录音与听写练习' : '自动连续播放已开启 (E)');
   };
   const toggleShadowing = () => {
-    if (playMode === 'shadowing') { setDictation(false); setPlaybackMode('auto'); return; }
+    if (playMode === 'shadowing') { scheduleModeTour(null); setDictation(false); setPlaybackMode('auto'); return; }
     const index = navigationIndex >= 0 ? navigationIndex : nextIndex;
     if (index >= 0) {
       setPlayMode('shadowing'); activateEchoRow(index, 'shadowing');
       setPlayback('逐句跟读已开启 (E)');
     } else setPlaybackMode('shadowing');
+    scheduleModeTour('shadowing');
   };
   const togglePracticeMode = () => {
-    if (playMode === 'practice') { setDictation(false); setPlaybackMode('auto'); return; }
+    if (playMode === 'practice') { scheduleModeTour(null); setDictation(false); setPlaybackMode('auto'); return; }
     const index = navigationIndex >= 0 ? navigationIndex : nextIndex;
     if (index >= 0) {
       activateEchoRow(index, 'practice');
       setPlayback('跟读模式已开启：录音与听写练习');
     } else setPlaybackMode('practice');
+    scheduleModeTour('practice');
   };
   const setPlaybackRate = (next: number) => {
     if (next === rate || !(PLAYBACK_RATES as readonly number[]).includes(next)) return;
@@ -381,7 +383,7 @@ function App() {
   if (view === 'settings') return <SettingsView onBack={() => setView('reader')} onSettings={next => { setSettings(next); applyTheme(next.theme); }}/>
 
   if (echoRows.length && state.status === 'loaded') return <main className="echo-shell" data-display-mode="phrases"
-    data-play-mode={playMode} data-playing={playing}>
+    data-play-mode={playMode} data-playing={playing} data-tour-active={tourActive}>
     <header className="echo-toolbar" data-tour="subtitle-selectors">
       <TrackSelect label="主字幕" value={primaryTrackId} disabled={primaryBusy || !primaryTrackId} placeholder="主字幕" tracks={video?.tracks ?? []} isBilibili={isBilibili}
         onChange={value => selectTracks(value, secondaryTrackId === 'none' || value === secondaryTrackId ? null : secondaryTrackId)}/>
@@ -440,7 +442,7 @@ function App() {
         title={playMode === 'shadowing' ? '关闭逐句跟读 (E)' : '开启逐句跟读 (E)'}
         onClick={toggleShadowing}
       >
-        <Ear/>逐句跟读<kbd>E</kbd>
+        <Ear/><span>逐句跟读</span><kbd>E</kbd>
       </button>
       <button className="echo-mode-control echo-replay" data-tour="replay" aria-label="重新播放当前句" title="重播当前句 (S)" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex, 'replay')}><RefreshCw/><span>重播</span><kbd>S</kbd></button>
       <Popover.Root><Popover.Trigger asChild><button className="echo-mode-control echo-rate" data-tour="speed" aria-label="播放速度" title="播放速度"><strong>{rate}x</strong><span>播放速度</span></button></Popover.Trigger>

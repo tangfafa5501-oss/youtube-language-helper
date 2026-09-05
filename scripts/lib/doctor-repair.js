@@ -21,18 +21,15 @@ const hasCall = (node, target) => nodes(node, ts.isCallExpression).some(call => 
 export const SHADOWING_BUTTON = `<button
         id="btn-sentence-shadowing"
         type="button"
+        className="echo-mode-control shadowing-mode"
+        data-tour="shadowing"
         aria-label="切换逐句跟读"
         aria-pressed={playMode === 'shadowing'}
         aria-keyshortcuts="E"
         title={playMode === 'shadowing' ? '关闭逐句跟读 (E)' : '开启逐句跟读 (E)'}
-        style={{
-          border: '1px solid #e28743', color: '#b85d19', background: playMode === 'shadowing' ? '#fee3a8' : '#fff7ed',
-          padding: '2px 8px', borderRadius: 6, fontSize: 12, cursor: 'pointer', margin: '0 4px',
-          flex: '0 0 auto', width: 'auto', whiteSpace: 'nowrap',
-        }}
         onClick={toggleShadowing}
       >
-        逐句跟读
+        <Ear/><span>逐句跟读</span><kbd>E</kbd>
       </button>`;
 const BANNER = `<p className="echo-toast" role="status">{playback || (playMode === 'shadowing' ? '逐句跟读已开启 (E)'
       : playMode === 'practice' ? '跟读模式已开启：录音与听写练习'
@@ -51,7 +48,8 @@ export function repairSidebar(input) {
   const button = buttons[0], click = button && attr(button, 'onClick');
   const valid = button && click && ts.isJsxExpression(click) && click.expression?.getText() === 'toggleShadowing'
     && value(button, 'id') === 'btn-sentence-shadowing' && attr(button, 'aria-pressed')?.getText().includes('playMode')
-    && button.children.some(c => ts.isJsxText(c) && c.text.trim() === '逐句跟读')
+    && value(button, 'className')?.split(/\s+/).includes('shadowing-mode') && value(button, 'data-tour') === 'shadowing'
+    && button.getText().includes('逐句跟读') && button.getText().includes('<kbd>E</kbd>')
     && children.indexOf(replay) === children.indexOf(button) + 1 && !hasCall(button, 'alert') && !hasCall(button, 'window.alert');
   if (!valid) {
     if (button) source = replace(source, button, '');

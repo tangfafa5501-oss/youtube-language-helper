@@ -276,8 +276,15 @@ try {
       await panel.getByRole('region', { name: '跟读练习', exact: true }).count() === 0
       && await panel.getByRole('button', { name: '听写模式', exact: true }).count() === 0
       && await microphone.getAttribute('aria-pressed') === 'false');
-    check(`${platform}: real click enables shadowing without alert`, await button.getAttribute('aria-pressed') === 'true'
-      && (await button.innerText()) === '逐句跟读' && (await panel.locator('.echo-toast').textContent()).includes('逐句跟读已开启'));
+    const shadowingButtonState = await button.evaluate(element => ({
+      label: element.getAttribute('aria-label'),
+      pressed: element.getAttribute('aria-pressed'),
+      shortcut: element.querySelector('kbd')?.textContent?.trim(),
+      text: element.textContent?.replace(/\s+/g, '').trim(),
+    }));
+    check(`${platform}: real click enables shadowing without alert`, shadowingButtonState.pressed === 'true'
+      && shadowingButtonState.label === '切换逐句跟读' && shadowingButtonState.shortcut === 'E'
+      && shadowingButtonState.text === '逐句跟读E' && (await panel.locator('.echo-toast').textContent()).includes('逐句跟读已开启'));
     report[`${platform}Cycles`] = [];
     // No clicks, key presses or media-clock writes during these two cycles.
     for (const [index, row] of rows.slice(0, 2).entries()) {
@@ -315,6 +322,15 @@ try {
     check(`${platform}: footer play cancels shadowing and resumes continuous playback`, await button.getAttribute('aria-pressed') === 'false');
     await page.locator('#movie_player').focus();
     check(`${platform}: keyboard focus is on the page player`, await page.locator('#movie_player').evaluate(el => document.activeElement === el));
+    report[`${platform}SpacePreflight`] = await panel.locator('.echo-shell').evaluate(element => ({
+      playMode: element.getAttribute('data-play-mode'),
+      playing: element.getAttribute('data-playing'),
+      tourActive: element.getAttribute('data-tour-active'),
+      driverPopoverCount: document.querySelectorAll('.driver-popover').length,
+    }));
+    check(`${platform}: completed guided tour releases keyboard controls`,
+      report[`${platform}SpacePreflight`].tourActive === 'false'
+      && report[`${platform}SpacePreflight`].driverPopoverCount === 0);
     report[`${platform}SpaceCycles`] = [];
     const mediaState = () => page.locator('video').evaluate(v => ({ paused: v.paused, time: v.currentTime,
       wallMs: performance.now(), nativeSpaceKeyups: window.__nativeSpaceKeyups ?? 0 }));
@@ -447,11 +463,11 @@ try {
     await panel.getByRole('button', { name: '暂停录音回放', exact: true }).click();
     await panel.getByRole('slider', { name: '录音播放进度' }).fill('0.5');
     check(`${platform}: recording progress seeks the native audio`, await audio.evaluate(el => Math.abs(el.currentTime - .5) < .05));
-    await assertTopFollow(`${platform}: recording changes keep the highlight top-aligned`);
+    await assertSmartFollow(`${platform}: recording changes keep the highlight safely aligned`);
     await panel.getByRole('button', { name: '选择录音', exact: true }).click();
     await screenshot(`recording-menu-${platform}-simulated-test-browser.png`);
     await panel.setViewportSize({ width: 320, height: 760 });
-    await assertTopFollow(`${platform}: narrow recording view retains the highlight breathing room`);
+    await assertSmartFollow(`${platform}: narrow recording view retains the highlight breathing room`);
     const narrowFits = () => {
       const boxes = [...document.querySelector('.practice-playback-row').children].map(el => el.getBoundingClientRect());
       const menu = document.querySelector('.practice-recordings-menu').getBoundingClientRect();
@@ -497,9 +513,13 @@ try {
     const help = panel.getByRole('button', { name: '如何读懂音高图表', exact: true });
     await help.hover();
     const helpBubble = panel.getByRole('tooltip').filter({ hasText: '如何读懂图表' }); await helpBubble.waitFor();
-    check(`${platform}: chart hover has the reference explanation and black/white styling`,
+    check(`${platform}: chart hover has the reference explanation, high contrast and viewport collision safety`,
       (await helpBubble.innerText()).includes('底部阴影区域表示音量强度，空白处代表停顿')
-      && await helpBubble.evaluate(el => getComputedStyle(el).backgroundColor === 'rgb(9, 9, 9)' && getComputedStyle(el).color === 'rgb(255, 255, 255)'));
+      && await helpBubble.evaluate(el => {
+        const style = getComputedStyle(el), bounds = el.getBoundingClientRect();
+        return style.backgroundColor === 'rgb(23, 32, 43)' && style.color === 'rgb(255, 255, 255)'
+          && bounds.left >= 8 && bounds.right <= innerWidth - 8 && bounds.top >= 8 && bounds.bottom <= innerHeight - 8;
+      }));
     check(`${platform}: complete pitch card and recording controls are visible for screenshot review`, await panel.locator('.practice-card').evaluate(el => {
       const card = el.getBoundingClientRect();
       return card.top >= document.querySelector('.echo-toast').getBoundingClientRect().bottom
@@ -578,11 +598,20 @@ try {
     await assertSmartFollow(`${platform}: contracted practice range re-centers as one block`);
     await panel.setViewportSize({ width: 320, height: 760 });
     await assertSmartFollow(`${platform}: narrow-sidebar wrapping preserves safe smart alignment`);
-    check(`${platform}: narrow footer controls do not overlap or leave the viewport`, await panel.locator('.echo-player').evaluate(footer => {
-      const boxes = [...footer.querySelectorAll('button')].map(el => el.getBoundingClientRect());
-      return boxes.every(box => box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight)
-        && boxes.every((box, i) => boxes.slice(i + 1).every(other => box.right <= other.left + 1 || other.right <= box.left + 1));
-    }));
+    const narrowFooterGeometry = await panel.locator('.echo-player').evaluate(footer => [...footer.querySelectorAll('button')].map(button => ({
+      name: button.getAttribute('aria-label'), box: button.getBoundingClientRect().toJSON(),
+      children: [...button.children].map(child => ({ tag: child.tagName, text: child.textContent?.trim(), box: child.getBoundingClientRect().toJSON() }))
+        .filter(item => item.box.width > 0 && item.box.height > 0),
+    })));
+    (report.narrowFooterGeometry ??= {})[platform] = narrowFooterGeometry;
+    check(`${platform}: narrow footer controls do not overlap or leave the viewport`, narrowFooterGeometry.every(button => {
+      const box = button.box;
+      return box.left >= 0 && box.right <= 320 && box.top >= 0 && box.bottom <= 760
+        && button.children.every(child => child.box.left >= box.left - 1 && child.box.right <= box.right + 1
+          && child.box.top >= box.top - 1 && child.box.bottom <= box.bottom + 1);
+    }) && narrowFooterGeometry.every((button, i) => narrowFooterGeometry.slice(i + 1).every(other =>
+      button.box.right <= other.box.left + 1 || other.box.right <= button.box.left + 1
+      || button.box.bottom <= other.box.top + 1 || other.box.bottom <= button.box.top + 1)));
     await microphone.hover();
     await screenshot(`narrow-top-follow-${platform}-simulated-test-browser.png`);
     await panel.setViewportSize({ width: 430, height: 900 });

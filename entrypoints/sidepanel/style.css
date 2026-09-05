@@ -152,6 +152,9 @@ button:focus-visible, [role="option"]:focus-visible, [role="menuitem"]:focus-vis
   .echo-player button span { font-size: 9px; }
   .echo-player button kbd { min-width: 15px; padding-inline: 2px; font-size: 8px; }
   .echo-player .echo-play .ylh-icon { width: 34px; height: 34px; padding: 8px; }
+  .echo-player .echo-play { column-gap: 1px; }
+  .echo-player .echo-play span { font-size: 8px; }
+  .echo-player .echo-play kbd { padding-inline: 1px; font-size: 7px; }
 }
 
 .driver-popover.ylh-tour-popover {
