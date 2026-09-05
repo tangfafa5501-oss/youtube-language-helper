@@ -155,8 +155,9 @@ async function assertSmartFollow(name) {
     const first = selected[0].getBoundingClientRect(), last = selected.at(-1).getBoundingClientRect();
     const blockHeight = last.bottom - first.top, available = Math.max(1, usableBottom - usableTop);
     const rowIndex = Number(selected[0].dataset.rowIndex ?? 0);
-    const keepNearTop = selected.length === 1 && rowIndex < 2;
-    const expectedTop = keepNearTop || blockHeight >= available ? usableTop : usableTop + (available - blockHeight) / 2;
+    const forceCenter = document.querySelector('.echo-shell')?.dataset.playMode === 'practice' || selected.length > 1 || rowIndex >= 3;
+    if (!forceCenter) return first.top >= usableTop - 4 && last.bottom <= usableBottom + 4;
+    const expectedTop = blockHeight >= available ? usableTop : usableTop + (available - blockHeight) / 2;
     return Math.abs(first.top - expectedTop) <= 4;
   }, undefined, { timeout: 4000 });
   const geometry = await panel.evaluate(() => {
@@ -236,6 +237,8 @@ try {
       await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2); await panel.reload(); }
     await panel.locator('.echo-list > li').first().waitFor(); await panel.setViewportSize({ width: 430, height: 900 });
     const button = panel.locator('#btn-sentence-shadowing'); await button.waitFor();
+    check(`${platform}: shadowing control renders audio lines rather than an ear`,
+      await button.locator('.ylh-icon').evaluate(el => getComputedStyle(el).maskImage.includes('audio-lines.svg')));
     const microphone = panel.getByRole('button', { name: '跟读模式', exact: true });
     if (platform === 'bilibili') {
       const welcome = panel.locator('.ylh-tour-welcome'); await welcome.waitFor();
@@ -285,6 +288,18 @@ try {
     check(`${platform}: real click enables shadowing without alert`, shadowingButtonState.pressed === 'true'
       && shadowingButtonState.label === '切换逐句跟读' && shadowingButtonState.shortcut === 'E'
       && shadowingButtonState.text === '逐句跟读E' && (await panel.locator('.echo-toast').textContent()).includes('逐句跟读已开启'));
+    const earlyCueFollow = [];
+    const recordEarlyCue = async index => {
+      await panel.locator('.echo-cue.selected').filter({ hasText: rows[index].content }).waitFor();
+      earlyCueFollow.push(await panel.evaluate(() => {
+        const selected = document.querySelector('.echo-cue.selected').getBoundingClientRect();
+        const contentTop = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
+        const footerTop = document.querySelector('.echo-player').getBoundingClientRect().top;
+        return { rowIndex: Number(document.querySelector('.echo-cue.selected').dataset.rowIndex), top: selected.top, bottom: selected.bottom,
+          center: (selected.top + selected.bottom) / 2, usableTop: contentTop + 24, usableBottom: footerTop - 24, scrollY };
+      }));
+    };
+    await recordEarlyCue(0);
     report[`${platform}Cycles`] = [];
     // No clicks, key presses or media-clock writes during these two cycles.
     for (const [index, row] of rows.slice(0, 2).entries()) {
@@ -304,12 +319,21 @@ try {
       check(`${platform}: sentence ${index + 1} automatically advances after ${expectedWaitMs}ms (observed ${actualWaitMs.toFixed(1)}ms)`,
         actualWaitMs >= expectedWaitMs - 80 && actualWaitMs <= expectedWaitMs + 500);
       check(`${platform}: automatic next retains shadowing mode`, await button.getAttribute('aria-pressed') === 'true');
+      await recordEarlyCue(index + 1);
     }
+    (report.earlyCueFollow ??= {})[platform] = earlyCueFollow;
+    check(`${platform}: first three highlights move downward without shifting the transcript viewport`,
+      earlyCueFollow.length === 3
+      && Math.max(...earlyCueFollow.map(item => item.scrollY)) - Math.min(...earlyCueFollow.map(item => item.scrollY)) <= 2
+      && earlyCueFollow[1].top > earlyCueFollow[0].top + 4 && earlyCueFollow[2].top > earlyCueFollow[1].top + 4
+      && earlyCueFollow.every(item => item.top >= item.usableTop - 4 && item.bottom <= item.usableBottom + 4));
     report[`${platform}Timeline`] = await page.evaluate(() => window.__shadowingTimeline);
     check(`${platform}: two sentence cycles never request a microphone`, await panel.evaluate(() => window.__microphoneRequests) === 0);
     await panel.locator('.echo-cue.selected').filter({ hasText: rows[2].content }).waitFor();
     check(`${platform}: sidebar selection follows the third sentence without user input`);
-    await assertSmartFollow(`${platform}: automatically highlighted third sentence is centered with surrounding context`);
+    check(`${platform}: automatically highlighted third sentence reaches the middle naturally without a list jump`,
+      Math.abs(earlyCueFollow[2].center - (earlyCueFollow[2].usableTop + earlyCueFollow[2].usableBottom) / 2)
+        <= (earlyCueFollow[2].usableBottom - earlyCueFollow[2].usableTop) * .25);
     await panel.getByRole('button', { name: '暂停', exact: true }).waitFor();
     await panel.locator('.echo-shell').evaluate(el => el.scrollIntoView({ block: 'start' }));
     const name = `shadowing-${platform}-simulated-test-browser.png`;
@@ -367,10 +391,10 @@ try {
     check(`${platform}: second button click restores continuous mode`, (await panel.locator('.echo-toast').textContent()).includes('自动连续播放'));
 
     await microphone.hover();
-    await panel.getByRole('tooltip').filter({ hasText: '开启跟读模式' }).waitFor();
+    await panel.getByRole('tooltip').filter({ hasText: '开启跟读练习' }).waitFor();
     check(`${platform}: microphone hover shows function and F without a native title`,
       await microphone.getAttribute('aria-keyshortcuts') === 'F' && await microphone.getAttribute('title') === null
-      && (await panel.getByRole('tooltip').filter({ hasText: '开启跟读模式' }).textContent()).includes('(F)'));
+      && (await panel.getByRole('tooltip').filter({ hasText: '开启跟读练习' }).textContent()).includes('(F)'));
     await page.locator('#movie_player').focus();
     await page.keyboard.down('f'); await panel.locator('.echo-shell[data-play-mode="practice"]').waitFor();
     await page.keyboard.down('f'); await page.keyboard.down('f'); await page.keyboard.up('f');
@@ -392,7 +416,11 @@ try {
     check(`${platform}: microphone opens separate recording practice, not sentence shadowing`,
       await button.getAttribute('aria-pressed') === 'false' && await microphone.getAttribute('aria-pressed') === 'true');
     await panel.locator('.echo-cue').first().click();
-    await assertSmartFollow(`${platform}: first sentence keeps a compact top safe area`);
+    await assertSmartFollow(`${platform}: opening recording practice immediately centers its highlighted sentence`);
+    await panel.keyboard.press('h'); await panel.getByRole('textbox', { name: '听写输入', exact: true }).waitFor();
+    await assertSmartFollow(`${platform}: opening dictation immediately keeps the complete highlight centered`);
+    await panel.keyboard.press('h'); await panel.getByRole('textbox', { name: '听写输入', exact: true }).waitFor({ state: 'detached' });
+    await assertSmartFollow(`${platform}: closing dictation keeps the recording-practice highlight centered`);
     await page.waitForFunction(() => { const v = document.querySelector('video'); return v.paused && Math.abs(v.currentTime - 3) < .02; });
     await page.waitForTimeout(3_100);
     check(`${platform}: recording practice stays on its sentence without automatic next`,
@@ -463,15 +491,19 @@ try {
     await panel.getByRole('button', { name: '暂停录音回放', exact: true }).click();
     await panel.getByRole('slider', { name: '录音播放进度' }).fill('0.5');
     check(`${platform}: recording progress seeks the native audio`, await audio.evaluate(el => Math.abs(el.currentTime - .5) < .05));
-    await assertSmartFollow(`${platform}: recording changes keep the highlight safely aligned`);
     await panel.getByRole('button', { name: '选择录音', exact: true }).click();
     await screenshot(`recording-menu-${platform}-simulated-test-browser.png`);
     await panel.setViewportSize({ width: 320, height: 760 });
+    await panel.locator('.practice-recordings-menu').waitFor({ state: 'detached' });
+    check(`${platform}: resizing closes the recording menu instead of trapping it behind the fixed footer`);
     await assertSmartFollow(`${platform}: narrow recording view retains the highlight breathing room`);
+    await panel.getByRole('button', { name: '选择录音', exact: true }).click();
+    await panel.locator('.practice-recordings-menu').waitFor();
     const narrowFits = () => {
       const boxes = [...document.querySelector('.practice-playback-row').children].map(el => el.getBoundingClientRect());
       const menu = document.querySelector('.practice-recordings-menu').getBoundingClientRect();
-      return menu.left >= 0 && menu.right <= innerWidth && menu.bottom <= innerHeight
+      const footerTop = document.querySelector('.echo-player').getBoundingClientRect().top;
+      return menu.left >= 0 && menu.right <= innerWidth && menu.top >= 0 && menu.bottom <= footerTop
         && boxes.every(box => box.left >= 0 && box.right <= innerWidth)
         && boxes.every((box, i) => boxes.slice(i + 1).every(other => box.right <= other.left + 1));
     };
@@ -479,6 +511,8 @@ try {
     check(`${platform}: custom recording controls and open menu fit a narrow sidebar`, await panel.evaluate(narrowFits));
     await screenshot(`recording-menu-narrow-${platform}-simulated-test-browser.png`);
     await panel.setViewportSize({ width: 430, height: 900 });
+    await panel.locator('.practice-recordings-menu').waitFor({ state: 'detached' });
+    await panel.getByRole('button', { name: '选择录音', exact: true }).click();
     await panel.getByRole('button', { name: '删除录音 #2', exact: true }).click();
     await panel.getByRole('button', { name: '录音 #2', exact: true }).waitFor({ state: 'detached' });
     check(`${platform}: deleting a different recording preserves the selected take and stable numbers`,
@@ -531,10 +565,10 @@ try {
     check(`${platform}: keyboard focus opens help and Escape dismisses without toggling the chart`);
     await panel.keyboard.press('Escape'); await helpBubble.waitFor({ state: 'detached' });
     await microphone.hover();
-    await panel.getByRole('tooltip').filter({ hasText: '跟读模式已开启' }).waitFor();
+    await panel.getByRole('tooltip').filter({ hasText: '跟读练习已开启' }).waitFor();
     await screenshot(`microphone-help-${platform}-simulated-test-browser.png`);
-    check(`${platform}: active microphone hint states pause, S replay and F close`,
-      (await panel.getByRole('tooltip').filter({ hasText: '跟读模式已开启' }).innerText()).includes('按 S 重播；F 关闭'));
+    check(`${platform}: active microphone hint states the one-shot pause and F shortcut`,
+      (await panel.getByRole('tooltip').filter({ hasText: '跟读练习已开启' }).innerText()).includes('片段播放后暂停 (F)'));
     const practiceScreenshot = `recording-${platform}-simulated-test-browser.png`;
     await panel.screenshot({ path: join(evidence, practiceScreenshot) }); report.screenshots.push(practiceScreenshot);
     await page.keyboard.press('h'); await panel.getByRole('textbox', { name: '听写输入' }).waitFor();
@@ -596,22 +630,47 @@ try {
     await assertSmartFollow(`${platform}: multi-sentence practice range centers as one visible block`);
     await panel.getByRole('button', { name: '收缩片段开头', exact: true }).click();
     await assertSmartFollow(`${platform}: contracted practice range re-centers as one block`);
+    await panel.locator('.echo-cue').nth(1).click();
+    await assertSmartFollow(`${platform}: middle practice sentence centers before compact footer inspection`);
     await panel.setViewportSize({ width: 320, height: 760 });
     await assertSmartFollow(`${platform}: narrow-sidebar wrapping preserves safe smart alignment`);
+    await panel.mouse.move(160, 300); await panel.waitForTimeout(180);
     const narrowFooterGeometry = await panel.locator('.echo-player').evaluate(footer => [...footer.querySelectorAll('button')].map(button => ({
       name: button.getAttribute('aria-label'), box: button.getBoundingClientRect().toJSON(),
+      border: getComputedStyle(button).borderTopWidth, borderStyle: getComputedStyle(button).borderTopStyle,
+      borderColor: getComputedStyle(button).borderTopColor,
       children: [...button.children].map(child => ({ tag: child.tagName, text: child.textContent?.trim(), box: child.getBoundingClientRect().toJSON() }))
         .filter(item => item.box.width > 0 && item.box.height > 0),
     })));
     (report.narrowFooterGeometry ??= {})[platform] = narrowFooterGeometry;
-    check(`${platform}: narrow footer controls do not overlap or leave the viewport`, narrowFooterGeometry.every(button => {
+    check(`${platform}: narrow footer controls form one bordered row without overlap or viewport escape`, narrowFooterGeometry.every(button => {
       const box = button.box;
       return box.left >= 0 && box.right <= 320 && box.top >= 0 && box.bottom <= 760
+        && Number.parseFloat(button.border) >= 1 && button.borderStyle === 'solid' && button.borderColor !== 'rgba(0, 0, 0, 0)'
         && button.children.every(child => child.box.left >= box.left - 1 && child.box.right <= box.right + 1
           && child.box.top >= box.top - 1 && child.box.bottom <= box.bottom + 1);
-    }) && narrowFooterGeometry.every((button, i) => narrowFooterGeometry.slice(i + 1).every(other =>
+    }) && Math.max(...narrowFooterGeometry.map(button => (button.box.top + button.box.bottom) / 2))
+      - Math.min(...narrowFooterGeometry.map(button => (button.box.top + button.box.bottom) / 2)) <= 1
+      && narrowFooterGeometry.every((button, i) => narrowFooterGeometry.slice(i + 1).every(other =>
       button.box.right <= other.box.left + 1 || other.box.right <= button.box.left + 1
       || button.box.bottom <= other.box.top + 1 || other.box.bottom <= button.box.top + 1)));
+    check(`${platform}: footer keeps labels and shortcuts accessible but visually hides them until hover or focus`,
+      await panel.locator('.echo-player').evaluate(footer => [...footer.querySelectorAll(':scope > button > span:not(.ylh-icon), :scope > button > kbd')]
+        .every(node => { const box = node.getBoundingClientRect(); return box.width <= 1 && box.height <= 1; })));
+    const displayedRate = await panel.getByRole('button', { name: '播放速度', exact: true }).locator('strong').textContent();
+    const footerHints = [
+      ['上一句', '上一句 (A)'], ['播放', '继续播放 (Space)'], ['下一句', '下一句 (D)'],
+      ['切换逐句跟读', '当前为跟读练习 (E)'], ['重新播放当前句', '重播当前句 (S)'],
+      ['播放速度', `播放速度 · ${displayedRate}`], ['听写模式', '听写模式已关闭 (H)'], ['跟读模式', '跟读练习已开启'],
+    ];
+    for (const [label, expected] of footerHints) {
+      await panel.getByRole('button', { name: label, exact: true }).hover();
+      const tooltip = panel.getByRole('tooltip').filter({ hasText: expected }); await tooltip.waitFor();
+      check(`${platform}: ${label} exposes its explanation only on hover and stays inside the narrow viewport`,
+        await tooltip.evaluate(el => { const box = el.getBoundingClientRect(); return box.left >= 8 && box.right <= innerWidth - 8 && box.top >= 8; }));
+      await panel.keyboard.press('Escape'); await tooltip.waitFor({ state: 'detached' });
+      await panel.mouse.move(160, 300);
+    }
     await microphone.hover();
     await screenshot(`narrow-top-follow-${platform}-simulated-test-browser.png`);
     await panel.setViewportSize({ width: 430, height: 900 });
@@ -628,6 +687,19 @@ try {
       await microphone.getAttribute('aria-pressed') === 'false' && await panel.evaluate(() => window.__microphoneRequests) === requests
       && await panel.getByRole('region', { name: '跟读练习', exact: true }).count() === 0);
     await button.click(); await panel.locator('.echo-shell[data-play-mode="auto"]').waitFor();
+    await panel.setViewportSize({ width: 553, height: 900 });
+    await button.hover();
+    const autoShadowingHint = panel.getByRole('tooltip').filter({ hasText: '逐句跟读已关闭 · 视频连续播放 (E)' });
+    await autoShadowingHint.waitFor();
+    check(`${platform}: auto-mode footer matches the reference interaction with an on-demand shadowing explanation`,
+      await autoShadowingHint.evaluate(el => {
+        const box = el.getBoundingClientRect(), trigger = document.querySelector('#btn-sentence-shadowing').getBoundingClientRect();
+        return box.left >= 8 && box.right <= innerWidth - 8 && box.bottom <= trigger.top;
+      }));
+    await screenshot(`footer-hover-${platform}-simulated-test-browser.png`);
+    const footerShot = `footer-bar-${platform}-simulated-test-browser.png`;
+    await panel.locator('.echo-player').screenshot({ path: join(evidence, footerShot) }); report.screenshots.push(footerShot);
+    await panel.keyboard.press('Escape'); await panel.setViewportSize({ width: 430, height: 900 });
   }
   check('executed sidebar, background and both content scripts match compiled hashes',
     report.runtimeHashes.some(r => r.relative === entry) && ['background.js', 'content-scripts/youtube.js', 'content-scripts/bilibili.js']
@@ -636,7 +708,7 @@ try {
   check('build files unchanged during browser verification', JSON.stringify(buildFiles) === JSON.stringify(await outputHashes()));
   report.passed = true; report.finishedAt = new Date().toISOString();
   await captureRuntimeHashes(id);
-  await copyFile(join(evidence, 'assessment-result-youtube-simulated-test-browser.png'), join(artifacts, 'verification_latest.png'));
+  await copyFile(join(evidence, 'footer-hover-youtube-simulated-test-browser.png'), join(artifacts, 'verification_latest.png'));
   await writeFile(join(artifacts, 'verification_latest.json'), JSON.stringify(report, null, 2));
   log(`PASS ${report.checks.length}/${report.checks.length}; warnings=${report.warnings.length}`);
   log(`SCREENSHOT ${join(artifacts, 'verification_latest.png')}`);

@@ -11,6 +11,7 @@ const sidebar = readFileSync(new URL('../entrypoints/sidepanel/main.tsx', import
 const playback = readFileSync(new URL('../lib/playback-machine.ts', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const buttonId = sidebar.indexOf('id="btn-sentence-shadowing"');
 const buttonStart = sidebar.lastIndexOf('<button', buttonId), buttonEnd = sidebar.indexOf('</button>', buttonId) + 9;
+const shadowingStart = sidebar.lastIndexOf('<HoverHint', buttonId), shadowingEnd = sidebar.indexOf('</HoverHint>', buttonEnd) + 12;
 
 test('doctor keeps healthy source byte-identical and idempotent', () => {
   assert.equal(repairSidebar(sidebar).source, sidebar); assert.equal(repairSidebar(sidebar).fixes.length, 0);
@@ -18,7 +19,7 @@ test('doctor keeps healthy source byte-identical and idempotent', () => {
   assert.equal(repairSidebar(sidebar.replaceAll('\n', '\r\n')).fixes.length, 0);
 });
 test('doctor restores a deleted button immediately before replay without touching microphone', () => {
-  const missing = sidebar.slice(0, buttonStart) + sidebar.slice(buttonEnd);
+  const missing = sidebar.slice(0, shadowingStart) + sidebar.slice(shadowingEnd);
   const repaired = repairSidebar(missing);
   assert.match(repaired.source, /id="btn-sentence-shadowing"/); assert.match(repaired.source, /onClick=\{toggleShadowing\}/);
   assert.equal(repairSidebar(repaired.source).fixes.length, 0);
