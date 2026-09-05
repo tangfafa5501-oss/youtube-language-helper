@@ -13,6 +13,7 @@ export function useCueFollow(highlightKey: string) {
     const toolbar = document.querySelector<HTMLElement>('.echo-toolbar');
     const banner = document.querySelector<HTMLElement>('.echo-toast');
     const footer = document.querySelector<HTMLElement>('.echo-player');
+    const shell = document.querySelector<HTMLElement>('.echo-shell');
     let following = true, frame = 0;
     const align = () => {
       if (!following || !list.isConnected) return;
@@ -21,13 +22,30 @@ export function useCueFollow(highlightKey: string) {
       const gap = 24, usableTop = top + gap, usableBottom = bottom - gap;
       let first = selected[0]!.getBoundingClientRect(), last = selected[selected.length - 1]!.getBoundingClientRect();
       const blockHeight = last.bottom - first.top, available = Math.max(1, usableBottom - usableTop);
-      // The first few single rows stay naturally near the top. Later rows and
-      // multi-row ranges are centered as a block when they fit in the safe area.
       const rowIndex = Number(selected[0]!.dataset.rowIndex ?? 0);
-      const keepNearTop = selected.length === 1 && rowIndex < 2;
-      const targetTop = keepNearTop || blockHeight >= available
-        ? usableTop : usableTop + (available - blockHeight) / 2;
+      const forceCenter = shell?.dataset.playMode === 'practice' || selected.length > 1 || rowIndex >= 3;
       const trailing = `${Math.max(72, available)}px`;
+      if (list.style.paddingBottom !== trailing) list.style.paddingBottom = trailing;
+
+      // Let the opening sentences move down through the viewport without
+      // shifting the whole transcript. Once the fourth row (or a later row)
+      // becomes active, keep it centered. Practice/dictation ranges center
+      // immediately, including a one-sentence range.
+      if (!forceCenter) {
+        if (list.style.paddingTop) {
+          list.style.paddingTop = '';
+          first = selected[0]!.getBoundingClientRect();
+          last = selected[selected.length - 1]!.getBoundingClientRect();
+        }
+        const blockCenter = (first.top + last.bottom) / 2;
+        const usableCenter = (usableTop + usableBottom) / 2;
+        const delta = first.top < usableTop ? first.top - usableTop
+          : last.bottom > usableBottom ? blockCenter - usableCenter : 0;
+        if (Math.abs(delta) > 1) window.scrollTo({ top: Math.max(0, scrollY + delta), behavior: 'instant' });
+        return;
+      }
+
+      const targetTop = blockHeight >= available ? usableTop : usableTop + (available - blockHeight) / 2;
       // A short transcript may not have enough document height above a later row
       // to scroll it down to the center. Add only the missing top space in that
       // case; long transcripts continue to use normal document scrolling.
@@ -39,7 +57,6 @@ export function useCueFollow(highlightKey: string) {
         first = selected[0]!.getBoundingClientRect();
         last = selected[selected.length - 1]!.getBoundingClientRect();
       }
-      if (list.style.paddingBottom !== trailing) list.style.paddingBottom = trailing;
       const delta = first.top - targetTop;
       if (Math.abs(delta) > 1) window.scrollTo({ top: scrollY + delta, behavior: 'instant' });
     };

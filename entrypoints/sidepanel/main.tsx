@@ -5,7 +5,7 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Popover from '@radix-ui/react-popover';
 import * as Select from '@radix-ui/react-select';
 import * as Slider from '@radix-ui/react-slider';
-import { BookOpen, Check, ChevronDown, CircleHelp, Ear, Keyboard, Languages, Mic, MoreVertical,
+import { AudioLines, BookOpen, Check, ChevronDown, CircleHelp, Keyboard, Languages, Mic, MoreVertical,
   ArrowUp, ArrowDown, Minus, Plus, Pause, Play, RefreshCw, Settings, SkipBack, SkipForward, X } from '../../components/icons';
 import { SettingsView } from '../../components/settings-view';
 import { HoverHint } from '../../components/hover-hint';
@@ -424,28 +424,39 @@ function App() {
             echoRows[navigationIndex]!.id, echoRows[endIndex]!.id, signal)}/></Suspense>
       </>}
     </EchoCueRow>)}</ol>
-    <footer className="echo-player">
-      <button className="echo-transport-control echo-previous" aria-label="上一句" title="上一句 (A)" disabled={previousIndex < 0} onClick={() => activateEchoRow(previousIndex, 'previous')}><SkipBack/><span>上一句</span><kbd>A</kbd></button>
-      <button className="echo-play" aria-label={playing ? '暂停' : '播放'}
-        data-tour="transport" title="播放/暂停 (Space)" onClick={togglePlayback}>
-        {playing ? <Pause/> : <Play/>}<span>播放/暂停</span><kbd>Space</kbd>
-      </button>
-      <button className="echo-transport-control echo-next" aria-label="下一句" title="下一句 (D)" disabled={nextIndex < 0} onClick={() => activateEchoRow(nextIndex, 'next')}><SkipForward/><span>下一句</span><kbd>D</kbd></button>
-      <button
-        id="btn-sentence-shadowing"
-        type="button"
-        className="echo-mode-control shadowing-mode"
-        data-tour="shadowing"
-        aria-label="切换逐句跟读"
-        aria-pressed={playMode === 'shadowing'}
-        aria-keyshortcuts="E"
-        title={playMode === 'shadowing' ? '关闭逐句跟读 (E)' : '开启逐句跟读 (E)'}
-        onClick={toggleShadowing}
-      >
-        <Ear/><span>逐句跟读</span><kbd>E</kbd>
-      </button>
-      <button className="echo-mode-control echo-replay" data-tour="replay" aria-label="重新播放当前句" title="重播当前句 (S)" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex, 'replay')}><RefreshCw/><span>重播</span><kbd>S</kbd></button>
-      <Popover.Root><Popover.Trigger asChild><button className="echo-mode-control echo-rate" data-tour="speed" aria-label="播放速度" title="播放速度"><strong>{rate}x</strong><span>播放速度</span></button></Popover.Trigger>
+    <footer className="echo-player" aria-label="播放与练习控制">
+      <HoverHint content="上一句 (A)">
+        <button className="echo-transport-control echo-previous" aria-label="上一句" disabled={previousIndex < 0} onClick={() => activateEchoRow(previousIndex, 'previous')}><SkipBack/><span>上一句</span><kbd>A</kbd></button>
+      </HoverHint>
+      <HoverHint content={`${playing ? '暂停视频' : '继续播放'} (Space)`}>
+        <button className="echo-play" aria-label={playing ? '暂停' : '播放'} data-tour="transport" onClick={togglePlayback}>
+          {playing ? <Pause/> : <Play/>}<span>{playing ? '暂停' : '播放'}</span><kbd>Space</kbd>
+        </button>
+      </HoverHint>
+      <HoverHint content="下一句 (D)">
+        <button className="echo-transport-control echo-next" aria-label="下一句" disabled={nextIndex < 0} onClick={() => activateEchoRow(nextIndex, 'next')}><SkipForward/><span>下一句</span><kbd>D</kbd></button>
+      </HoverHint>
+      <HoverHint content={playMode === 'shadowing'
+        ? '逐句跟读已开启 · 句末停顿后自动下一句 (E)'
+        : playMode === 'practice' ? '逐句跟读已关闭 · 当前为跟读练习 (E)'
+          : '逐句跟读已关闭 · 视频连续播放 (E)'}>
+        <button
+          id="btn-sentence-shadowing"
+          type="button"
+          className="echo-mode-control shadowing-mode"
+          data-tour="shadowing"
+          aria-label="切换逐句跟读"
+          aria-pressed={playMode === 'shadowing'}
+          aria-keyshortcuts="E"
+          onClick={toggleShadowing}
+        >
+          <AudioLines/><span>逐句跟读</span><kbd>E</kbd>
+        </button>
+      </HoverHint>
+      <HoverHint content="重播当前句 (S)">
+        <button className="echo-mode-control echo-replay" data-tour="replay" aria-label="重新播放当前句" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex, 'replay')}><RefreshCw/><span>重播</span><kbd>S</kbd></button>
+      </HoverHint>
+      <Popover.Root><HoverHint content={`播放速度 · ${rate}x`}><Popover.Trigger asChild><button className="echo-mode-control echo-rate" data-tour="speed" aria-label="播放速度"><strong>{rate}x</strong><span>播放速度</span></button></Popover.Trigger></HoverHint>
         <Popover.Portal><Popover.Content className="echo-rate-content" side="top" sideOffset={10} align="end">
           <div className="echo-rate-heading"><strong>播放速度</strong><b>{rate}x</b></div>
           <Slider.Root className="echo-slider" min={0} max={PLAYBACK_RATES.length - 1} step={1}
@@ -457,10 +468,10 @@ function App() {
           <Popover.Arrow className="echo-popover-arrow"/>
         </Popover.Content></Popover.Portal>
       </Popover.Root>
-      {playMode === 'practice' && <button className={`echo-mode-control dictation-mode ${dictation ? 'active' : ''}`} data-tour="dictation" aria-label="听写模式" aria-pressed={dictation} title="听写模式 (H)" onClick={toggleDictation}><BookOpen/><span>听写</span><kbd>H</kbd></button>}
+      {playMode === 'practice' && <HoverHint content={`听写模式已${dictation ? '开启' : '关闭'} (H)`}><button className={`echo-mode-control dictation-mode ${dictation ? 'active' : ''}`} data-tour="dictation" aria-label="听写模式" aria-pressed={dictation} onClick={toggleDictation}><BookOpen/><span>听写</span><kbd>H</kbd></button></HoverHint>}
       <HoverHint align="end" content={playMode === 'practice'
-        ? '跟读模式已开启—片段播放一次后暂停，按 S 重播；F 关闭。'
-        : '开启跟读模式—片段播放一次后暂停，可录音与听写 (F)。'}>
+        ? '跟读练习已开启 · 片段播放后暂停 (F)'
+        : '开启跟读练习 · 录音、听写与音高对比 (F)'}>
         <button className={`echo-mode-control practice-mode ${playMode === 'practice' ? 'active' : ''}`} data-tour="practice" data-play-mode-control="practice" aria-label="跟读模式" aria-keyshortcuts="F" aria-pressed={playMode === 'practice'} onClick={togglePracticeMode}><Mic/><span>跟读练习</span><kbd>F</kbd></button>
       </HoverHint>
     </footer>

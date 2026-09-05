@@ -17,6 +17,7 @@ export function RecordingPlayer({ recordings, selectedId, onSelect, onRemove, as
   const selected = recordings.find(row => row.id === selectedId);
   const assessment = useRecordingAssessment(selected, assessmentDisabled);
   const audio = useRef<HTMLAudioElement>(null);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
   const [url, setUrl] = useState(''), [playing, setPlaying] = useState(false), [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0), [error, setError] = useState(''), [open, setOpen] = useState(false);
   useEffect(() => {
@@ -27,6 +28,22 @@ export function RecordingPlayer({ recordings, selectedId, onSelect, onRemove, as
     const next = URL.createObjectURL(selected.audio); setUrl(next);
     return () => { player?.pause(); URL.revokeObjectURL(next); };
   }, [selected]);
+  useEffect(() => {
+    if (!open) return;
+    let frame = 0;
+    const keepTriggerVisible = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const trigger = menuTrigger.current, footer = document.querySelector<HTMLElement>('.echo-player');
+        if (!trigger || !footer) return;
+        const triggerBox = trigger.getBoundingClientRect(), safeBottom = footer.getBoundingClientRect().top - 12;
+        if (triggerBox.bottom > safeBottom) scrollBy({ top: triggerBox.bottom - safeBottom, behavior: 'instant' });
+      });
+    };
+    const closeOnResize = () => setOpen(false);
+    keepTriggerVisible(); addEventListener('resize', closeOnResize);
+    return () => { cancelAnimationFrame(frame); removeEventListener('resize', closeOnResize); };
+  }, [open]);
   const toggle = () => {
     const player = audio.current; if (!player || !url) return;
     if (!player.paused) { player.pause(); return; }
@@ -66,8 +83,9 @@ export function RecordingPlayer({ recordings, selectedId, onSelect, onRemove, as
         }}/>
       <span className="practice-playback-time">{clock(position)} / {clock(duration)}</span>
       <Popover.Root open={open} onOpenChange={setOpen}>
-        <Popover.Trigger asChild><button className="practice-recordings-trigger" type="button" aria-label="选择录音" title="选择录音"><MoreVertical/></button></Popover.Trigger>
-        <Popover.Portal><Popover.Content className="practice-recordings-menu" aria-label="录音条目" align="end" sideOffset={6} collisionPadding={12}>
+        <Popover.Trigger asChild><button ref={menuTrigger} className="practice-recordings-trigger" type="button" aria-label="选择录音" title="选择录音"><MoreVertical/></button></Popover.Trigger>
+        <Popover.Portal><Popover.Content className="practice-recordings-menu" aria-label="录音条目" side="top" align="end" sideOffset={8}
+          collisionPadding={{ top: 12, right: 12, bottom: 80, left: 12 }}>
           {recordings.map((row, index) => {
             const number = row.take ?? recordings.length - index;
             return <div className="practice-recording-item" key={row.id} data-selected={row.id === selectedId}>

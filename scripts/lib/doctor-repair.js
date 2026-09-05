@@ -18,19 +18,23 @@ const unique = (items, label) => { assert.equal(items.length, 1, `Expected one $
 const replace = (source, node, text) => source.slice(0, node.getStart()) + text + source.slice(node.end);
 const hasCall = (node, target) => nodes(node, ts.isCallExpression).some(call => call.expression.getText() === target);
 
-export const SHADOWING_BUTTON = `<button
-        id="btn-sentence-shadowing"
-        type="button"
-        className="echo-mode-control shadowing-mode"
-        data-tour="shadowing"
-        aria-label="切换逐句跟读"
-        aria-pressed={playMode === 'shadowing'}
-        aria-keyshortcuts="E"
-        title={playMode === 'shadowing' ? '关闭逐句跟读 (E)' : '开启逐句跟读 (E)'}
-        onClick={toggleShadowing}
-      >
-        <Ear/><span>逐句跟读</span><kbd>E</kbd>
-      </button>`;
+export const SHADOWING_BUTTON = `<HoverHint content={playMode === 'shadowing'
+        ? '逐句跟读已开启 · 句末停顿后自动下一句 (E)'
+        : playMode === 'practice' ? '逐句跟读已关闭 · 当前为跟读练习 (E)'
+          : '逐句跟读已关闭 · 视频连续播放 (E)'}>
+        <button
+          id="btn-sentence-shadowing"
+          type="button"
+          className="echo-mode-control shadowing-mode"
+          data-tour="shadowing"
+          aria-label="切换逐句跟读"
+          aria-pressed={playMode === 'shadowing'}
+          aria-keyshortcuts="E"
+          onClick={toggleShadowing}
+        >
+          <AudioLines/><span>逐句跟读</span><kbd>E</kbd>
+        </button>
+      </HoverHint>`;
 const BANNER = `<p className="echo-toast" role="status">{playback || (playMode === 'shadowing' ? '逐句跟读已开启 (E)'
       : playMode === 'practice' ? '跟读模式已开启：录音与听写练习'
         : playMode === 'manual' ? '手动按句模式：将在当前句尾暂停' : '自动连续播放已开启 (E)')}</p>`;
@@ -41,8 +45,11 @@ export function repairSidebar(input) {
   unique(nodes(file, n => ts.isVariableDeclaration(n) && n.name.getText() === 'toggleShadowing'), 'existing toggleShadowing function');
   const footer = unique(elements(file).filter(e => e.openingElement.tagName.getText() === 'footer' && value(e, 'className') === 'echo-player'), 'player footer');
   const children = footer.children.filter(ts.isJsxElement);
-  const replay = unique(children.filter(e => value(e, 'aria-label') === '重新播放当前句'), 'replay anchor');
-  const buttons = children.filter(e => e.openingElement.tagName.getText() === 'button' && (value(e, 'id') === 'btn-sentence-shadowing'
+  const descendants = elements(footer);
+  const replay = unique(descendants.filter(e => value(e, 'aria-label') === '重新播放当前句'), 'replay anchor');
+  const directChild = element => { let current = element; while (current.parent !== footer) current = current.parent; return current; };
+  const replayControl = directChild(replay);
+  const buttons = descendants.filter(e => e.openingElement.tagName.getText() === 'button' && (value(e, 'id') === 'btn-sentence-shadowing'
     || e.children.some(c => c.getText().includes('逐句跟读'))));
   assert.ok(buttons.length <= 1, 'Duplicate shadowing text buttons; refusing to guess ownership');
   const button = buttons[0], click = button && attr(button, 'onClick');
@@ -50,12 +57,16 @@ export function repairSidebar(input) {
     && value(button, 'id') === 'btn-sentence-shadowing' && attr(button, 'aria-pressed')?.getText().includes('playMode')
     && value(button, 'className')?.split(/\s+/).includes('shadowing-mode') && value(button, 'data-tour') === 'shadowing'
     && button.getText().includes('逐句跟读') && button.getText().includes('<kbd>E</kbd>')
-    && children.indexOf(replay) === children.indexOf(button) + 1 && !hasCall(button, 'alert') && !hasCall(button, 'window.alert');
+    && children.indexOf(replayControl) === children.indexOf(directChild(button)) + 1
+    && directChild(button).openingElement.tagName.getText() === 'HoverHint'
+    && directChild(button).getText().includes('视频连续播放 (E)')
+    && !hasCall(button, 'alert') && !hasCall(button, 'window.alert');
   if (!valid) {
-    if (button) source = replace(source, button, '');
+    if (button) source = replace(source, directChild(button), '');
     file = parse(source, true);
     const anchor = unique(elements(file).filter(e => value(e, 'aria-label') === '重新播放当前句'), 'replay anchor');
-    source = source.slice(0, anchor.getStart()) + SHADOWING_BUTTON + '\n      ' + source.slice(anchor.getStart());
+    let anchorControl = anchor; while (anchorControl.parent.openingElement?.tagName?.getText?.() !== 'footer') anchorControl = anchorControl.parent;
+    source = source.slice(0, anchorControl.getStart()) + SHADOWING_BUTTON + '\n      ' + source.slice(anchorControl.getStart());
     fixes.push('restored shadowing button, real handler, mode label and position');
   }
   file = parse(source, true);
