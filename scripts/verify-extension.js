@@ -49,6 +49,13 @@ const entry = html.match(/src="\/?(chunks\/sidepanel-[^"]+\.js)"/)?.[1];
 assert.ok(entry, 'Compiled sidebar entry not found');
 const code = await readFile(join(output, entry), 'utf8');
 check('new bundle contains button and no placeholder', code.includes('btn-sentence-shadowing') && !code.includes('逐句跟读按钮已渲染'));
+const manifest = JSON.parse(await readFile(join(output, 'manifest.json'), 'utf8'));
+const iconSizes = ['16', '32', '48', '96', '128'];
+check('compiled manifest uses explicit blue V extension icons instead of Chrome letter fallback',
+  iconSizes.every(size => manifest.icons?.[size] === `icon-${size}.png`)
+  && manifest.action?.default_icon?.['16'] === 'icon-16.png'
+  && manifest.action?.default_icon?.['32'] === 'icon-32.png'
+  && iconSizes.every(size => buildFiles.some(([path]) => path === `icon-${size}.png`)));
 const bundled = chromium.executablePath();
 const candidates = [process.env.YLH_CHROMIUM_PATH, bundled,
   process.platform === 'win32' ? join(process.env.ProgramFiles || 'C:/Program Files', 'Google/Chrome/Application/chrome.exe') : undefined].filter(Boolean);
@@ -149,8 +156,12 @@ async function assertSmartFollow(name) {
   await panel.waitForFunction(() => {
     const selected = [...document.querySelectorAll('.echo-cue.selected')];
     if (!selected.length) return false;
-    const contentTop = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
-    const footerTop = document.querySelector('.echo-player').getBoundingClientRect().top;
+    const shell = document.querySelector('.echo-shell');
+    const contentTop = shell.dataset.topControlsVisible === 'true'
+      ? Math.max(document.querySelector('.echo-toolbar').getBoundingClientRect().bottom,
+        document.querySelector('.echo-toast').getBoundingClientRect().bottom) : 0;
+    const footerTop = shell.dataset.bottomControlsVisible === 'true'
+      ? document.querySelector('.echo-player').getBoundingClientRect().top : innerHeight;
     const usableTop = contentTop + 24, usableBottom = footerTop - 24;
     const first = selected[0].getBoundingClientRect(), last = selected.at(-1).getBoundingClientRect();
     const blockHeight = last.bottom - first.top, available = Math.max(1, usableBottom - usableTop);
@@ -162,8 +173,12 @@ async function assertSmartFollow(name) {
   }, undefined, { timeout: 4000 });
   const geometry = await panel.evaluate(() => {
     const selected = [...document.querySelectorAll('.echo-cue.selected')];
-    const contentTop = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
-    const footerTop = document.querySelector('.echo-player').getBoundingClientRect().top;
+    const shell = document.querySelector('.echo-shell');
+    const contentTop = shell.dataset.topControlsVisible === 'true'
+      ? Math.max(document.querySelector('.echo-toolbar').getBoundingClientRect().bottom,
+        document.querySelector('.echo-toast').getBoundingClientRect().bottom) : 0;
+    const footerTop = shell.dataset.bottomControlsVisible === 'true'
+      ? document.querySelector('.echo-player').getBoundingClientRect().top : innerHeight;
     const first = selected[0].getBoundingClientRect(), last = selected.at(-1).getBoundingClientRect();
     return { rowIndices: selected.map(el => el.dataset.rowIndex), viewport: [innerWidth, innerHeight], contentTop, footerTop,
       selectedTop: first.top, selectedBottom: last.bottom, selectedCenter: (first.top + last.bottom) / 2,
@@ -179,6 +194,12 @@ async function screenshot(name) {
   const before = await panel.evaluate(geometry);
   await panel.screenshot({ path: join(evidence, name) }); report.screenshots.push(name);
   (report.screenshotGeometry ??= []).push({ name, before, after: await panel.evaluate(geometry) });
+}
+async function revealControlBar(edge) {
+  const viewport = panel.viewportSize();
+  assert.ok(viewport, 'Panel viewport is unavailable');
+  await panel.mouse.move(viewport.width / 2, edge === 'top' ? 2 : viewport.height - 2);
+  await panel.waitForFunction(position => document.querySelector('.echo-shell')?.dataset[`${position}ControlsVisible`] === 'true', edge);
 }
 try {
   context = await chromium.launchPersistentContext(profile, { executablePath, headless: true, viewport: { width: 1200, height: 950 },
@@ -229,6 +250,17 @@ try {
   const attached = await chromium.connectOverCDP(endpoint.webSocketDebuggerUrl);
   panel = attached.contexts()[0].pages().find(p => p.url() === `chrome-extension://${id}/sidepanel.html`);
   assert.ok(panel, 'Actual Chrome sidepanel target must exist'); panel.setDefaultTimeout(15_000);
+  report.extensionIconColors = await panel.evaluate(async () => {
+    const image = new Image(); image.src = chrome.runtime.getURL('icon-128.png'); await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = 128; canvas.height = 128;
+    const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+    const pixel = (x, y) => [...context.getImageData(x, y, 1, 1).data];
+    return { blue: pixel(64, 16), whiteV: pixel(64, 94), transparentCorner: pixel(0, 0) };
+  });
+  check('loaded extension icon pixels are blue background with a white V',
+    report.extensionIconColors.blue[0] === 22 && report.extensionIconColors.blue[1] === 119 && report.extensionIconColors.blue[2] === 255
+    && report.extensionIconColors.whiteV.slice(0, 3).every(channel => channel >= 245)
+    && report.extensionIconColors.transparentCorner[3] === 0);
   panel.on('dialog', async dialog => { report.errors.push(`Unexpected dialog: ${dialog.message()}`); await dialog.dismiss(); });
   panel.on('pageerror', error => report.errors.push(error.message));
   panel.on('console', message => { if (message.type() === 'error') report.errors.push(message.text()); else if (message.type() === 'warning') report.warnings.push(message.text()); });
@@ -269,6 +301,7 @@ try {
         window.__shadowingTimeline.push({ type, wallMs: performance.now(), mediaSeconds: video.currentTime });
       });
     });
+    await revealControlBar('bottom');
     await button.click(); await panel.locator('.echo-shell[data-play-mode="shadowing"]').waitFor();
     if (platform === 'bilibili') {
       const shadowingTour = panel.locator('.ylh-tour-shadowing'); await shadowingTour.waitFor();
@@ -293,8 +326,12 @@ try {
       await panel.locator('.echo-cue.selected').filter({ hasText: rows[index].content }).waitFor();
       earlyCueFollow.push(await panel.evaluate(() => {
         const selected = document.querySelector('.echo-cue.selected').getBoundingClientRect();
-        const contentTop = document.querySelector('.echo-toolbar').getBoundingClientRect().height + document.querySelector('.echo-toast').getBoundingClientRect().height;
-        const footerTop = document.querySelector('.echo-player').getBoundingClientRect().top;
+        const shell = document.querySelector('.echo-shell');
+        const contentTop = shell.dataset.topControlsVisible === 'true'
+          ? Math.max(document.querySelector('.echo-toolbar').getBoundingClientRect().bottom,
+            document.querySelector('.echo-toast').getBoundingClientRect().bottom) : 0;
+        const footerTop = shell.dataset.bottomControlsVisible === 'true'
+          ? document.querySelector('.echo-player').getBoundingClientRect().top : innerHeight;
         return { rowIndex: Number(document.querySelector('.echo-cue.selected').dataset.rowIndex), top: selected.top, bottom: selected.bottom,
           center: (selected.top + selected.bottom) / 2, usableTop: contentTop + 24, usableBottom: footerTop - 24, scrollY };
       }));
@@ -340,6 +377,7 @@ try {
     await panel.screenshot({ path: join(evidence, name) }); report.screenshots.push(name);
     await captureRuntimeHashes(id);
     await page.waitForFunction(() => { const v = document.querySelector('video'); return v.paused && Math.abs(v.currentTime - 8) < .02; });
+    await revealControlBar('bottom');
     await panel.getByRole('button', { name: '播放', exact: true }).click();
     await panel.locator('.echo-shell[data-play-mode="auto"]').waitFor();
     await page.waitForFunction(() => document.querySelector('video').currentTime > 8.3);
@@ -386,10 +424,12 @@ try {
     check(`${platform}: page E independently enables shadowing through the bridge`, await button.getAttribute('aria-pressed') === 'true');
     await panel.keyboard.press('e'); await panel.locator('.echo-shell[data-play-mode="auto"]').waitFor();
     check(`${platform}: panel E independently disables shadowing`, await button.getAttribute('aria-pressed') === 'false');
+    await revealControlBar('bottom');
     await button.click(); await panel.locator('.echo-shell[data-play-mode="shadowing"]').waitFor();
     await button.click(); await panel.locator('.echo-shell[data-play-mode="auto"]').waitFor();
     check(`${platform}: second button click restores continuous mode`, (await panel.locator('.echo-toast').textContent()).includes('自动连续播放'));
 
+    await revealControlBar('bottom');
     await microphone.hover();
     await panel.getByRole('tooltip').filter({ hasText: '开启跟读练习' }).waitFor();
     check(`${platform}: microphone hover shows function and F without a native title`,
@@ -406,6 +446,7 @@ try {
     await page.getByRole('textbox', { name: '视频页面测试输入框' }).press('f');
     check(`${platform}: page text input keeps F as text`, await page.getByRole('textbox').inputValue() === 'f'
       && await microphone.getAttribute('aria-pressed') === 'false');
+    await revealControlBar('bottom');
     await microphone.click(); await panel.locator('.echo-shell[data-play-mode="practice"]').waitFor();
     await panel.getByRole('region', { name: '跟读练习', exact: true }).waitFor();
     if (platform === 'bilibili') {
@@ -556,14 +597,14 @@ try {
       }));
     check(`${platform}: complete pitch card and recording controls are visible for screenshot review`, await panel.locator('.practice-card').evaluate(el => {
       const card = el.getBoundingClientRect();
-      return card.top >= document.querySelector('.echo-toast').getBoundingClientRect().bottom
-        && card.bottom <= document.querySelector('.echo-player').getBoundingClientRect().top;
+      return card.top >= 0 && card.bottom <= innerHeight;
     }));
     await screenshot(`pitch-help-${platform}-simulated-test-browser.png`);
     await panel.keyboard.press('Escape'); await helpBubble.waitFor({ state: 'detached' });
     await help.focus(); await helpBubble.waitFor();
     check(`${platform}: keyboard focus opens help and Escape dismisses without toggling the chart`);
     await panel.keyboard.press('Escape'); await helpBubble.waitFor({ state: 'detached' });
+    await revealControlBar('bottom');
     await microphone.hover();
     await panel.getByRole('tooltip').filter({ hasText: '跟读练习已开启' }).waitFor();
     await screenshot(`microphone-help-${platform}-simulated-test-browser.png`);
@@ -634,51 +675,98 @@ try {
     await assertSmartFollow(`${platform}: middle practice sentence centers before compact footer inspection`);
     await panel.setViewportSize({ width: 320, height: 760 });
     await assertSmartFollow(`${platform}: narrow-sidebar wrapping preserves safe smart alignment`);
-    await panel.mouse.move(160, 300); await panel.waitForTimeout(180);
-    const narrowFooterGeometry = await panel.locator('.echo-player').evaluate(footer => [...footer.querySelectorAll('button')].map(button => ({
-      name: button.getAttribute('aria-label'), box: button.getBoundingClientRect().toJSON(),
-      border: getComputedStyle(button).borderTopWidth, borderStyle: getComputedStyle(button).borderTopStyle,
-      borderColor: getComputedStyle(button).borderTopColor,
-      children: [...button.children].map(child => ({ tag: child.tagName, text: child.textContent?.trim(), box: child.getBoundingClientRect().toJSON() }))
-        .filter(item => item.box.width > 0 && item.box.height > 0),
-    })));
-    (report.narrowFooterGeometry ??= {})[platform] = narrowFooterGeometry;
-    check(`${platform}: narrow footer controls form one bordered row without overlap or viewport escape`, narrowFooterGeometry.every(button => {
+    await panel.mouse.move(160, 300);
+    await panel.waitForFunction(() => {
+      const shell = document.querySelector('.echo-shell'), top = document.querySelector('.echo-toolbar'), bottom = document.querySelector('.echo-player');
+      return shell.dataset.topControlsVisible === 'false' && shell.dataset.bottomControlsVisible === 'false'
+        && Number(getComputedStyle(top).opacity) === 0 && Number(getComputedStyle(bottom).opacity) === 0;
+    }, undefined, { timeout: 450 });
+    check(`${platform}: controls start hidden and leave the complete viewport to subtitles`);
+    const topShowStart = await panel.evaluate(() => performance.now());
+    await panel.mouse.move(160, 2);
+    await panel.waitForFunction(() => document.querySelector('.echo-shell').dataset.topControlsVisible === 'true'
+      && Number(getComputedStyle(document.querySelector('.echo-toolbar')).opacity) === 1, undefined, { timeout: 300 });
+    const topShowMs = await panel.evaluate(start => performance.now() - start, topShowStart);
+    check(`${platform}: top edge reveals compact controls independently within 300ms`, topShowMs <= 300
+      && await panel.locator('.echo-shell').getAttribute('data-bottom-controls-visible') === 'false');
+    const topGeometry = await panel.locator('.echo-toolbar').evaluate(toolbar => ({
+      box: toolbar.getBoundingClientRect().toJSON(), background: getComputedStyle(toolbar).backgroundColor,
+      triggerHeights: [...toolbar.querySelectorAll('button')].map(button => button.getBoundingClientRect().height),
+    }));
+    check(`${platform}: top control bar is exactly 44px high`, Math.abs(topGeometry.box.height - 44) <= .5);
+    check(`${platform}: top control bar uses the requested blue background`, topGeometry.background === 'rgb(22, 119, 255)');
+    await panel.getByRole('button', { name: '键盘快捷键', exact: true }).click();
+    const shortcutDialog = panel.locator('.echo-shortcut-card'); await shortcutDialog.waitFor();
+    await shortcutDialog.locator('.echo-dialog-done').click(); await shortcutDialog.waitFor({ state: 'detached' });
+    const topHideStart = await panel.evaluate(() => performance.now());
+    await panel.mouse.move(160, 300);
+    await panel.waitForFunction(() => document.querySelector('.echo-shell').dataset.topControlsVisible === 'false'
+      && Number(getComputedStyle(document.querySelector('.echo-toolbar')).opacity) === 0, undefined, { timeout: 450 });
+    const topHideMs = await panel.evaluate(start => performance.now() - start, topHideStart);
+    check(`${platform}: clicking a top-bar button cannot pin the bar after pointer leave`, topHideMs <= 300);
+    const bottomShowStart = await panel.evaluate(() => performance.now());
+    await panel.mouse.move(160, 758);
+    await panel.waitForFunction(() => document.querySelector('.echo-shell').dataset.bottomControlsVisible === 'true'
+      && Number(getComputedStyle(document.querySelector('.echo-player')).opacity) === 1, undefined, { timeout: 300 });
+    const bottomShowMs = await panel.evaluate(start => performance.now() - start, bottomShowStart);
+    check(`${platform}: bottom edge reveals compact controls within 300ms`, bottomShowMs <= 300);
+    const narrowFooterGeometry = await panel.locator('.echo-player').evaluate(footer => ({
+      footer: footer.getBoundingClientRect().toJSON(), background: getComputedStyle(footer).backgroundColor,
+      buttons: [...footer.querySelectorAll('button')].map(button => ({
+        name: button.getAttribute('aria-label'), box: button.getBoundingClientRect().toJSON(),
+        children: [...button.children].map(child => ({ tag: child.tagName, text: child.textContent?.trim(), box: child.getBoundingClientRect().toJSON() }))
+          .filter(item => item.box.width > 1 && item.box.height > 1),
+      })),
+    }));
+    (report.narrowFooterGeometry ??= {})[platform] = { ...narrowFooterGeometry, topShowMs, topHideMs, bottomShowMs };
+    check(`${platform}: bottom bar and controls are reduced by one third to 44/28/31/14px`,
+      Math.abs(narrowFooterGeometry.footer.height - 44) <= .5
+      && narrowFooterGeometry.buttons.filter(button => button.name !== '播放' && button.name !== '暂停').every(button => Math.abs(button.box.height - 28) <= .5)
+      && narrowFooterGeometry.buttons.filter(button => button.name === '播放' || button.name === '暂停').every(button => Math.abs(button.box.height - 31) <= .5)
+      && narrowFooterGeometry.buttons.flatMap(button => button.children.filter(child => child.tag === 'SPAN' && !child.text)).every(child => child.box.width <= 14.5 && child.box.height <= 14.5));
+    check(`${platform}: bottom control bar uses the requested blue background`, narrowFooterGeometry.background === 'rgb(22, 119, 255)');
+    check(`${platform}: compact Bilibili-style footer stays in one row without overlap or viewport escape`, narrowFooterGeometry.buttons.every(button => {
       const box = button.box;
       return box.left >= 0 && box.right <= 320 && box.top >= 0 && box.bottom <= 760
-        && Number.parseFloat(button.border) >= 1 && button.borderStyle === 'solid' && button.borderColor !== 'rgba(0, 0, 0, 0)'
         && button.children.every(child => child.box.left >= box.left - 1 && child.box.right <= box.right + 1
           && child.box.top >= box.top - 1 && child.box.bottom <= box.bottom + 1);
-    }) && Math.max(...narrowFooterGeometry.map(button => (button.box.top + button.box.bottom) / 2))
-      - Math.min(...narrowFooterGeometry.map(button => (button.box.top + button.box.bottom) / 2)) <= 1
-      && narrowFooterGeometry.every((button, i) => narrowFooterGeometry.slice(i + 1).every(other =>
+    }) && Math.max(...narrowFooterGeometry.buttons.map(button => (button.box.top + button.box.bottom) / 2))
+      - Math.min(...narrowFooterGeometry.buttons.map(button => (button.box.top + button.box.bottom) / 2)) <= 1
+      && narrowFooterGeometry.buttons.every((button, i) => narrowFooterGeometry.buttons.slice(i + 1).every(other =>
       button.box.right <= other.box.left + 1 || other.box.right <= button.box.left + 1
       || button.box.bottom <= other.box.top + 1 || other.box.bottom <= button.box.top + 1)));
     check(`${platform}: footer keeps labels and shortcuts accessible but visually hides them until hover or focus`,
       await panel.locator('.echo-player').evaluate(footer => [...footer.querySelectorAll(':scope > button > span:not(.ylh-icon), :scope > button > kbd')]
         .every(node => { const box = node.getBoundingClientRect(); return box.width <= 1 && box.height <= 1; })));
-    const displayedRate = await panel.getByRole('button', { name: '播放速度', exact: true }).locator('strong').textContent();
-    const footerHints = [
-      ['上一句', '上一句 (A)'], ['播放', '继续播放 (Space)'], ['下一句', '下一句 (D)'],
-      ['切换逐句跟读', '当前为跟读练习 (E)'], ['重新播放当前句', '重播当前句 (S)'],
-      ['播放速度', `播放速度 · ${displayedRate}`], ['听写模式', '听写模式已关闭 (H)'], ['跟读模式', '跟读练习已开启'],
-    ];
-    for (const [label, expected] of footerHints) {
-      await panel.getByRole('button', { name: label, exact: true }).hover();
-      const tooltip = panel.getByRole('tooltip').filter({ hasText: expected }); await tooltip.waitFor();
-      check(`${platform}: ${label} exposes its explanation only on hover and stays inside the narrow viewport`,
-        await tooltip.evaluate(el => { const box = el.getBoundingClientRect(); return box.left >= 8 && box.right <= innerWidth - 8 && box.top >= 8; }));
-      await panel.keyboard.press('Escape'); await tooltip.waitFor({ state: 'detached' });
-      await panel.mouse.move(160, 300);
-    }
-    await microphone.hover();
-    await screenshot(`narrow-top-follow-${platform}-simulated-test-browser.png`);
+    await panel.locator('.echo-player').getByRole('button', { name: '重新播放当前句', exact: true }).click();
+    const bottomHideStart = await panel.evaluate(() => performance.now());
+    await panel.mouse.move(160, 300);
+    await panel.waitForFunction(() => document.querySelector('.echo-shell').dataset.bottomControlsVisible === 'false'
+      && Number(getComputedStyle(document.querySelector('.echo-player')).opacity) === 0, undefined, { timeout: 450 });
+    const bottomHideMs = await panel.evaluate(start => performance.now() - start, bottomHideStart);
+    (report.narrowFooterGeometry[platform]).bottomHideMs = bottomHideMs;
+    check(`${platform}: clicking a bottom-bar button cannot pin the bar after pointer leave`, bottomHideMs <= 300);
+    await assertSmartFollow(`${platform}: hidden controls recenter the complete highlight in the full viewport`);
+    await panel.locator('.echo-cue').nth(1).focus();
+    await panel.keyboard.press('e');
+    await panel.locator('.echo-shell[data-play-mode="shadowing"]').waitFor();
+    check(`${platform}: hidden control bars do not disable the E shadowing shortcut`,
+      await panel.locator('.echo-shell').getAttribute('data-top-controls-visible') === 'false'
+      && await panel.locator('.echo-shell').getAttribute('data-bottom-controls-visible') === 'false');
+    await panel.keyboard.press('f');
+    await panel.locator('.echo-shell[data-play-mode="practice"]').waitFor();
+    check(`${platform}: hidden control bars do not disable the F practice shortcut`,
+      await panel.locator('.echo-shell').getAttribute('data-top-controls-visible') === 'false'
+      && await panel.locator('.echo-shell').getAttribute('data-bottom-controls-visible') === 'false');
+    await revealControlBar('bottom');
+    await screenshot(`narrow-bottom-controls-${platform}-simulated-test-browser.png`);
     await panel.setViewportSize({ width: 430, height: 900 });
     await assertSmartFollow(`${platform}: restored sidebar size preserves smart alignment`);
     await panel.mouse.wheel(0, -120); await panel.waitForTimeout(200);
     const manualScroll = await panel.evaluate(() => scrollY); await panel.waitForTimeout(350);
     check(`${platform}: media updates do not fight manual scrolling`, Math.abs(await panel.evaluate(() => scrollY) - manualScroll) < 2);
-    await verifyAssessment({ panel, page, platform, fixture: youdaoFixture, check, screenshot });
+    await verifyAssessment({ panel, page, platform, fixture: youdaoFixture, check, screenshot, revealControlBar });
+    await revealControlBar('bottom');
     await button.click(); await panel.locator('.echo-shell[data-play-mode="shadowing"]').waitFor();
     await panel.getByRole('region', { name: '跟读练习', exact: true }).waitFor({ state: 'detached' });
     const requests = await panel.evaluate(() => window.__microphoneRequests);
@@ -688,6 +776,7 @@ try {
       && await panel.getByRole('region', { name: '跟读练习', exact: true }).count() === 0);
     await button.click(); await panel.locator('.echo-shell[data-play-mode="auto"]').waitFor();
     await panel.setViewportSize({ width: 553, height: 900 });
+    await revealControlBar('bottom');
     await button.hover();
     const autoShadowingHint = panel.getByRole('tooltip').filter({ hasText: '逐句跟读已关闭 · 视频连续播放 (E)' });
     await autoShadowingHint.waitFor();

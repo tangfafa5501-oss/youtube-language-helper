@@ -17,8 +17,12 @@ export function useCueFollow(highlightKey: string) {
     let following = true, frame = 0;
     const align = () => {
       if (!following || !list.isConnected) return;
-      const top = (toolbar?.getBoundingClientRect().height ?? 0) + (banner?.getBoundingClientRect().height ?? 0);
-      const bottom = innerHeight - (footer?.getBoundingClientRect().height ?? 0);
+      const toolbarBox = toolbar?.getBoundingClientRect(), bannerBox = banner?.getBoundingClientRect();
+      const footerBox = footer?.getBoundingClientRect();
+      const top = shell?.dataset.topControlsVisible === 'true'
+        ? Math.max(0, Math.min(innerHeight, Math.max(toolbarBox?.bottom ?? 0, bannerBox?.bottom ?? 0))) : 0;
+      const bottom = shell?.dataset.bottomControlsVisible === 'true'
+        ? Math.min(innerHeight, Math.max(0, footerBox?.top ?? innerHeight)) : innerHeight;
       const gap = 24, usableTop = top + gap, usableBottom = bottom - gap;
       let first = selected[0]!.getBoundingClientRect(), last = selected[selected.length - 1]!.getBoundingClientRect();
       const blockHeight = last.bottom - first.top, available = Math.max(1, usableBottom - usableTop);
@@ -67,9 +71,12 @@ export function useCueFollow(highlightKey: string) {
     // Text wrapping, translated lines and a lazily mounted practice card change geometry.
     const observer = new ResizeObserver(schedule);
     for (const element of [list, toolbar, banner, footer, anchor, tail, ...selected]) if (element) observer.observe(element);
+    const visibilityObserver = new MutationObserver(schedule);
+    if (shell) visibilityObserver.observe(shell, { attributes: true,
+      attributeFilter: ['data-top-controls-visible', 'data-bottom-controls-visible'] });
     addEventListener('resize', resized);
     addEventListener('wheel', stopFollowing, { passive: true }); addEventListener('touchmove', stopFollowing, { passive: true });
-    return () => { cancelAnimationFrame(frame); observer.disconnect(); removeEventListener('resize', resized);
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); visibilityObserver.disconnect(); removeEventListener('resize', resized);
       removeEventListener('wheel', stopFollowing); removeEventListener('touchmove', stopFollowing);
       list.style.paddingTop = previous.top; list.style.paddingBottom = previous.bottom; };
   }, [highlightKey]);

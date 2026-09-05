@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -27,6 +27,43 @@ import './style.css';
 const ShadowingExerciseCard = lazy(() => import('../../components/shadowing-exercise-card'));
 
 const defaultSettings: PublicSettings = { language: 'en', theme: 'system', displayMode: 'phrases' };
+const CONTROL_HIDE_DELAY_MS = 80;
+
+function useAutoHideControlBar() {
+  const [visible, setVisible] = useState(false);
+  const timerRef = useRef<number | null>(null);
+  const heldRef = useRef(false);
+  const keyboardModalityRef = useRef(false);
+  const clearTimer = useCallback(() => {
+    if (timerRef.current === null) return;
+    clearTimeout(timerRef.current); timerRef.current = null;
+  }, []);
+  const show = useCallback(() => { clearTimer(); setVisible(true); }, [clearTimer]);
+  const hideSoon = useCallback(() => {
+    clearTimer();
+    if (heldRef.current) return;
+    timerRef.current = window.setTimeout(() => { timerRef.current = null; setVisible(false); }, CONTROL_HIDE_DELAY_MS);
+  }, [clearTimer]);
+  const hold = useCallback((held: boolean) => {
+    heldRef.current = held;
+    if (held) show(); else hideSoon();
+  }, [hideSoon, show]);
+  const showFromFocus = useCallback((event: React.FocusEvent<HTMLElement>) => {
+    if (keyboardModalityRef.current || event.target.matches(':focus-visible')) show();
+  }, [show]);
+  useEffect(() => {
+    const usePointerModality = () => { keyboardModalityRef.current = false; };
+    const useKeyboardModality = () => { keyboardModalityRef.current = true; };
+    addEventListener('pointerdown', usePointerModality, true);
+    addEventListener('keydown', useKeyboardModality, true);
+    return () => {
+      removeEventListener('pointerdown', usePointerModality, true);
+      removeEventListener('keydown', useKeyboardModality, true);
+    };
+  }, []);
+  useEffect(() => clearTimer, [clearTimer]);
+  return { visible, show, hideSoon, hold, showFromFocus };
+}
 
 function timestamp(ms: number | null) {
   if (ms === null) return '时间异常';
@@ -68,9 +105,10 @@ const SHORTCUT_SECTIONS = [
   ] },
 ] as const;
 
-function TrackSelect({ label, value, disabled, placeholder, tracks, isBilibili, onChange }: { label: string; value: string;
-  disabled?: boolean; placeholder: string; tracks: readonly Track[]; isBilibili: boolean; onChange: (value: string) => void }) {
-  return <Select.Root value={value} onValueChange={onChange} disabled={disabled}>
+function TrackSelect({ label, value, disabled, placeholder, tracks, isBilibili, onChange, onOpenChange }: { label: string; value: string;
+  disabled?: boolean; placeholder: string; tracks: readonly Track[]; isBilibili: boolean; onChange: (value: string) => void;
+  onOpenChange?: (open: boolean) => void }) {
+  return <Select.Root value={value} onValueChange={onChange} onOpenChange={onOpenChange} disabled={disabled}>
     <Select.Trigger className="echo-track-trigger" aria-label={label} title={label}>
       <Languages/><Select.Value placeholder={placeholder}/><Select.Icon><ChevronDown/></Select.Icon>
     </Select.Trigger>
@@ -125,6 +163,8 @@ function App() {
   const exerciseRef = useRef<ExerciseHandle>(null);
   const [currentTimeMs, setCurrentTimeMs] = useState<number | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const topControls = useAutoHideControlBar();
+  const bottomControls = useAutoHideControlBar();
   const autoRequestedSessionRef = useRef('');
   const desiredSecondaryRef = useRef<string | null>(null);
   const connectionRef = useRef<ReturnType<typeof connectPanel> | null>(null);
@@ -383,11 +423,16 @@ function App() {
   if (view === 'settings') return <SettingsView onBack={() => setView('reader')} onSettings={next => { setSettings(next); applyTheme(next.theme); }}/>
 
   if (echoRows.length && state.status === 'loaded') return <main className="echo-shell" data-display-mode="phrases"
-    data-play-mode={playMode} data-playing={playing} data-tour-active={tourActive}>
-    <header className="echo-toolbar" data-tour="subtitle-selectors">
+    data-play-mode={playMode} data-playing={playing} data-tour-active={tourActive}
+    data-top-controls-visible={topControls.visible || tourActive} data-bottom-controls-visible={bottomControls.visible || tourActive}>
+    <div className="echo-control-sensor echo-control-sensor-top" aria-hidden="true"
+      onPointerEnter={topControls.show} onPointerLeave={topControls.hideSoon}/>
+    <header className="echo-toolbar" data-tour="subtitle-selectors" onPointerEnter={topControls.show}
+      onPointerLeave={topControls.hideSoon} onFocusCapture={topControls.showFromFocus} onBlurCapture={topControls.hideSoon}>
       <TrackSelect label="主字幕" value={primaryTrackId} disabled={primaryBusy || !primaryTrackId} placeholder="主字幕" tracks={video?.tracks ?? []} isBilibili={isBilibili}
-        onChange={value => selectTracks(value, secondaryTrackId === 'none' || value === secondaryTrackId ? null : secondaryTrackId)}/>
-      <Select.Root value={secondaryTrackId} disabled={primaryBusy || secondaryBusy} onValueChange={value => selectTracks(primaryTrackId, value === 'none' ? null : value)}>
+        onChange={value => selectTracks(value, secondaryTrackId === 'none' || value === secondaryTrackId ? null : secondaryTrackId)} onOpenChange={topControls.hold}/>
+      <Select.Root value={secondaryTrackId} disabled={primaryBusy || secondaryBusy} onOpenChange={topControls.hold}
+        onValueChange={value => selectTracks(primaryTrackId, value === 'none' ? null : value)}>
         <Select.Trigger className="echo-track-trigger" aria-label="第二字幕"><Languages/><Select.Value placeholder="第二字幕"/><Select.Icon><ChevronDown/></Select.Icon></Select.Trigger>
         <Select.Portal><Select.Content className="echo-select-content" position="popper" sideOffset={6} align="start"><Select.Viewport>
           <Select.Item className="echo-select-item" value="none"><Select.ItemText>无第二字幕</Select.ItemText><Select.ItemIndicator><Check/></Select.ItemIndicator></Select.Item>
@@ -396,7 +441,7 @@ function App() {
       </Select.Root>
       <span className="echo-toolbar-spacer"/>
       <button className="echo-icon" aria-label="键盘快捷键" title="键盘快捷键" onClick={() => setShortcutsOpen(true)}><Keyboard/></button>
-      <DropdownMenu.Root><DropdownMenu.Trigger asChild><button className="echo-icon" data-tour="actions" aria-label="更多选项" title="更多选项"><MoreVertical/></button></DropdownMenu.Trigger>
+      <DropdownMenu.Root onOpenChange={topControls.hold}><DropdownMenu.Trigger asChild><button className="echo-icon" data-tour="actions" aria-label="更多选项" title="更多选项"><MoreVertical/></button></DropdownMenu.Trigger>
         <DropdownMenu.Portal><DropdownMenu.Content className="echo-menu-content" sideOffset={6} align="end">
           <DropdownMenu.Item className="echo-menu-item" onSelect={refreshCaptions}><RefreshCw/><span>重新获取字幕</span></DropdownMenu.Item>
           <DropdownMenu.Item className="echo-menu-item" onSelect={() => void startTour('welcome', true)}><CircleHelp/><span>显示引导</span></DropdownMenu.Item>
@@ -424,7 +469,10 @@ function App() {
             echoRows[navigationIndex]!.id, echoRows[endIndex]!.id, signal)}/></Suspense>
       </>}
     </EchoCueRow>)}</ol>
-    <footer className="echo-player" aria-label="播放与练习控制">
+    <div className="echo-control-sensor echo-control-sensor-bottom" aria-hidden="true"
+      onPointerEnter={bottomControls.show} onPointerLeave={bottomControls.hideSoon}/>
+    <footer className="echo-player" aria-label="播放与练习控制" onPointerEnter={bottomControls.show}
+      onPointerLeave={bottomControls.hideSoon} onFocusCapture={bottomControls.showFromFocus} onBlurCapture={bottomControls.hideSoon}>
       <HoverHint content="上一句 (A)">
         <button className="echo-transport-control echo-previous" aria-label="上一句" disabled={previousIndex < 0} onClick={() => activateEchoRow(previousIndex, 'previous')}><SkipBack/><span>上一句</span><kbd>A</kbd></button>
       </HoverHint>
@@ -456,7 +504,7 @@ function App() {
       <HoverHint content="重播当前句 (S)">
         <button className="echo-mode-control echo-replay" data-tour="replay" aria-label="重新播放当前句" disabled={navigationIndex < 0} onClick={() => activateEchoRow(navigationIndex, 'replay')}><RefreshCw/><span>重播</span><kbd>S</kbd></button>
       </HoverHint>
-      <Popover.Root><HoverHint content={`播放速度 · ${rate}x`}><Popover.Trigger asChild><button className="echo-mode-control echo-rate" data-tour="speed" aria-label="播放速度"><strong>{rate}x</strong><span>播放速度</span></button></Popover.Trigger></HoverHint>
+      <Popover.Root onOpenChange={bottomControls.hold}><HoverHint content={`播放速度 · ${rate}x`}><Popover.Trigger asChild><button className="echo-mode-control echo-rate" data-tour="speed" aria-label="播放速度"><strong>{rate}x</strong><span>播放速度</span></button></Popover.Trigger></HoverHint>
         <Popover.Portal><Popover.Content className="echo-rate-content" side="top" sideOffset={10} align="end">
           <div className="echo-rate-heading"><strong>播放速度</strong><b>{rate}x</b></div>
           <Slider.Root className="echo-slider" min={0} max={PLAYBACK_RATES.length - 1} step={1}
